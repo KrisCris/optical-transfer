@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>receiver UI states</title>
+<style>
+  body { margin: 0; background: #07090c; }
+  iframe { width: 100%; height: 100vh; border: 0; display: block; margin: 0 auto; }
+  body.narrow iframe { width: 390px; }
+</style>
+<iframe id="frame" src="../index.html"></iframe>
+<script type="module">
+  /*
+   * Renders the receiver's own markup and stylesheet in states a camera would
+   * otherwise be needed to reach, so the progress panel and result card can be
+   * looked at during design work.
+   *
+   * It sets DOM state directly and deliberately carries NO hook into app.js:
+   * a seam that let a page inject a "complete" event would be a way to render
+   * a fabricated verified result, which is exactly the property this receiver
+   * exists to guarantee. So this exercises the CSS and the markup — app.js's
+   * own render path is covered by tests/optical-loop.html, which drives the
+   * real WasmReceiver end to end.
+   */
+  const frame = document.getElementById("frame");
+  await new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+  const d = frame.contentDocument;
+  const params = new URLSearchParams(location.search);
+  const stage = params.get("stage") ?? "progress";
+  if (params.has("narrow")) document.body.classList.add("narrow");
+
+  const show = (id, visible) => { d.getElementById(id).hidden = !visible; };
+  const grid = (total, solved) => {
+    const host = d.getElementById("blocks-grid");
+    host.replaceChildren();
+    for (let i = 0; i < total; i++) {
+      const cell = d.createElement("i");
+      if (i < solved) cell.className = "solved";
+      host.append(cell);
+    }
+  };
+
+  d.getElementById("viewfinder").dataset.state = stage === "complete" ? "done" : "scanning";
+  show("start", false);
+  show("stop", stage !== "complete");
+  show("progress", true);
+
+  if (stage === "complete") {
+    d.getElementById("bar").style.width = "100%";
+    d.getElementById("percent").innerHTML = "100<small>%</small>";
+    d.getElementById("m-frames").textContent = "184";
+    d.getElementById("m-blocks").textContent = "156/156";
+    d.getElementById("m-decodes").textContent = "212";
+    grid(156, 156);
+    show("result", true);
+    d.getElementById("result-name").textContent = "quarterly-review-final.pdf";
+    d.getElementById("result-stats").textContent = "1.4 MB · 38.2s · SHA-256 verified";
+    show("result-save", true);
+    d.getElementById("progress-label").textContent = "Complete";
+    d.getElementById("status").textContent = "Received and verified.";
+  } else {
+    d.getElementById("bar").style.width = "62%";
+    d.getElementById("percent").innerHTML = "62<small>%</small>";
+    d.getElementById("m-frames").textContent = "97";
+    d.getElementById("m-blocks").textContent = "58/156";
+    d.getElementById("m-decodes").textContent = "119";
+    grid(156, 58);
+    d.getElementById("status").textContent = "Hold steady — receiving.";
+  }
+</script>

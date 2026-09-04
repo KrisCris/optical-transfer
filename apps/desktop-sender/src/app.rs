@@ -23,6 +23,7 @@ use eframe::egui;
 use crate::{
     packing::{PackingJob, PackingState},
     qr::{Ecc, GRID_OPTIONS, QrFrame, grid_dims},
+    theme,
     transfer::{FRAME_BYTES_OPTIONS, TX_FPS_OPTIONS, Transfer, TransferSettings, human_bytes},
 };
 
@@ -84,6 +85,7 @@ struct Stream {
 }
 
 pub struct SenderApp {
+    themed: bool,
     tab: Tab,
     settings: TransferSettings,
     selection: Option<Selection>,
@@ -104,6 +106,7 @@ impl Default for SenderApp {
 impl SenderApp {
     pub fn new() -> Self {
         Self {
+            themed: false,
             tab: Tab::File,
             settings: TransferSettings::default(),
             selection: None,
@@ -346,6 +349,10 @@ impl eframe::App for SenderApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        if !self.themed {
+            theme::apply(ctx);
+            self.themed = true;
+        }
         self.poll_packing(ctx);
 
         if let Stage::Streaming(stream) = &mut self.stage {
@@ -383,26 +390,32 @@ impl eframe::App for SenderApp {
 
         egui::Panel::bottom("warning")
             .resizable(false)
+            .show_separator_line(false)
             .show(ui, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new("⚠").color(egui::Color32::from_rgb(0xd9, 0x8a, 0x00)),
-                    );
-                    ui.label(
-                        egui::RichText::new(SECURITY_WARNING)
-                            .color(egui::Color32::from_rgb(0xd9, 0x8a, 0x00))
-                            .strong(),
-                    );
+                    theme::pill(ui, &format!("⚠  {SECURITY_WARNING}"), theme::WARN);
                 });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             });
 
         egui::Panel::left("controls")
             .resizable(false)
-            .exact_size(340.0)
+            .exact_size(348.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 16,
+                        top: 0,
+                        bottom: 0,
+                    }),
+            )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.draw_controls(ui));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.draw_controls(ui));
             });
 
         egui::CentralPanel::default().show(ui, |ui| self.draw_stage(ui));
@@ -411,50 +424,98 @@ impl eframe::App for SenderApp {
 
 impl SenderApp {
     fn draw_controls(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading("Optical transfer");
-        ui.add_space(8.0);
-
+        ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::File, "File");
-            ui.selectable_value(&mut self.tab, Tab::Text, "Text");
+            ui.label(
+                egui::RichText::new("Optical Transfer")
+                    .size(theme::HEADING)
+                    .color(theme::TEXT)
+                    .strong(),
+            );
         });
-        ui.separator();
+        ui.label(
+            egui::RichText::new("Screen to camera. No network.")
+                .size(theme::SMALL)
+                .color(theme::TEXT_FAINT),
+        );
+        ui.add_space(14.0);
 
+        theme::section(ui, "What to send");
         let locked = self.busy();
+        ui.add_enabled_ui(!locked, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::File, "  File  ");
+                ui.selectable_value(&mut self.tab, Tab::Text, "  Text  ");
+            });
+        });
+        ui.add_space(8.0);
+
         ui.add_enabled_ui(!locked, |ui| match self.tab {
             Tab::File => {
-                if ui.button("Choose file…").clicked() {
-                    self.choose_file();
-                }
-                match &self.selection {
-                    Some(selection) => {
-                        ui.label(egui::RichText::new(&selection.name).strong());
-                        ui.label(format!(
-                            "{} · {}",
-                            human_bytes(selection.bytes.len()),
-                            selection.media_type
-                        ));
+                theme::card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    match &self.selection {
+                        Some(selection) => {
+                            ui.label(
+                                egui::RichText::new(&selection.name)
+                                    .color(theme::TEXT)
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} · {}",
+                                    human_bytes(selection.bytes.len()),
+                                    selection.media_type
+                                ))
+                                .size(theme::SMALL)
+                                .color(theme::TEXT_DIM),
+                            );
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new("No file chosen").color(theme::TEXT_FAINT),
+                            );
+                            ui.label(
+                                egui::RichText::new("Up to 64 MB")
+                                    .size(theme::SMALL)
+                                    .color(theme::TEXT_FAINT),
+                            );
+                        }
                     }
-                    None => {
-                        ui.label(egui::RichText::new("No file chosen").weak());
+                    ui.add_space(8.0);
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 32.0],
+                            egui::Button::new("Choose file…"),
+                        )
+                        .clicked()
+                    {
+                        self.choose_file();
                     }
-                }
+                });
             }
             Tab::Text => {
-                ui.label("Text to send");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.text)
-                        .desired_rows(6)
+                        .desired_rows(7)
                         .desired_width(f32::INFINITY)
                         .hint_text("Type or paste anything…"),
+                );
+                let bytes = self.text.len();
+                ui.label(
+                    egui::RichText::new(if bytes == 0 {
+                        "Up to 4 MB of text".to_owned()
+                    } else {
+                        format!("{} of text", human_bytes(bytes))
+                    })
+                    .size(theme::SMALL)
+                    .color(theme::TEXT_FAINT),
                 );
             }
         });
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(egui::RichText::new("Transmission").strong());
+        ui.add_space(14.0);
+        theme::section(ui, "Transmission");
         ui.add_enabled_ui(!locked, |ui| {
             egui::Grid::new("settings")
                 .num_columns(2)
@@ -520,107 +581,180 @@ impl SenderApp {
                 if ui.button("Stop").clicked() {
                     self.stop();
                 }
-            } else if ui.button("Start sending").clicked() {
+            } else if theme::primary_button(ui, "Start sending", 38.0).clicked() {
                 self.start();
             }
-            if self.streaming() && ui.button("Fullscreen").clicked() {
+        });
+        if self.streaming() {
+            ui.add_space(6.0);
+            if ui
+                .add_sized(
+                    [ui.available_width(), 32.0],
+                    egui::Button::new("Fullscreen"),
+                )
+                .clicked()
+            {
                 self.fullscreen_stage = true;
             }
-        });
+        }
 
         if let Some(error) = &self.error {
-            ui.add_space(8.0);
-            ui.colored_label(egui::Color32::from_rgb(0xc0, 0x30, 0x30), error);
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(theme::DANGER.linear_multiply(0.12))
+                .stroke(egui::Stroke::new(1.0, theme::DANGER.linear_multiply(0.4)))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(error)
+                            .color(theme::DANGER)
+                            .size(theme::SMALL),
+                    );
+                });
         }
 
         if let Stage::Streaming(stream) = &self.stage {
-            ui.add_space(12.0);
-            ui.separator();
-            ui.label(egui::RichText::new("Stream").strong());
-            egui::Grid::new("stats")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Sending");
-                    ui.label(stream.transfer.name());
-                    ui.end_row();
-                    ui.label("Frame");
-                    ui.label(format!(
-                        "{} of {} per cycle",
-                        stream.transfer.sent_frames() % stream.transfer.cycle_frames().max(1),
-                        stream.transfer.cycle_frames()
-                    ));
-                    ui.end_row();
-                    ui.label("Cycles");
-                    ui.label(stream.transfer.cycles_completed().to_string());
-                    ui.end_row();
-                    ui.label("Payload");
-                    ui.label(format!(
-                        "{} in {} blocks",
-                        human_bytes(stream.transfer.transmitted_size()),
-                        stream.transfer.source_blocks()
-                    ));
-                    ui.end_row();
-                    ui.label("Compression");
-                    ui.label(match stream.transfer.compression() {
-                        optical_core::container::Compression::Gzip => format!(
-                            "gzip, {} → {}",
-                            human_bytes(stream.transfer.original_size()),
-                            human_bytes(stream.transfer.transmitted_size())
-                        ),
-                        optical_core::container::Compression::None => "none".to_owned(),
-                    });
-                    ui.end_row();
-                    ui.label("Code");
-                    ui.label(format!(
-                        "V{} · ECC {}{}",
-                        stream.renderer.locked_version().unwrap_or(0),
-                        stream.transfer.settings().ecc.label(),
-                        if stream.cells.len() > 1 {
-                            format!(" · ×{}", stream.cells.len())
-                        } else {
-                            String::new()
-                        }
-                    ));
-                    ui.end_row();
-                    ui.label("Session");
-                    ui.label(format!("{:#06x}", stream.transfer.session_id()));
-                    ui.end_row();
+            ui.add_space(16.0);
+            theme::section(ui, "Stream");
+            theme::card(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::pill(ui, "LIVE", theme::ACCENT);
+                    ui.label(
+                        egui::RichText::new(stream.transfer.name())
+                            .size(theme::SMALL)
+                            .color(theme::TEXT_DIM),
+                    );
                 });
+                ui.add_space(10.0);
+                egui::Grid::new("stats")
+                    .num_columns(2)
+                    .spacing([12.0, 5.0])
+                    .show(ui, |ui| {
+                        let cycle = stream.transfer.cycle_frames().max(1);
+                        theme::stat(
+                            ui,
+                            "Frame",
+                            &format!("{} / {cycle}", stream.transfer.sent_frames() % cycle),
+                        );
+                        theme::stat(
+                            ui,
+                            "Cycles",
+                            &stream.transfer.cycles_completed().to_string(),
+                        );
+                        theme::stat(ui, "Payload", &{
+                            let blocks = stream.transfer.source_blocks();
+                            format!(
+                                "{} · {blocks} block{}",
+                                human_bytes(stream.transfer.transmitted_size()),
+                                if blocks == 1 { "" } else { "s" }
+                            )
+                        });
+                        theme::stat(
+                            ui,
+                            "Compression",
+                            &match stream.transfer.compression() {
+                                optical_core::container::Compression::Gzip => format!(
+                                    "gzip {} → {}",
+                                    human_bytes(stream.transfer.original_size()),
+                                    human_bytes(stream.transfer.transmitted_size())
+                                ),
+                                optical_core::container::Compression::None => "none".to_owned(),
+                            },
+                        );
+                        theme::stat(
+                            ui,
+                            "Code",
+                            &format!(
+                                "V{} · ECC {}{}",
+                                stream.renderer.locked_version().unwrap_or(0),
+                                stream.transfer.settings().ecc.label(),
+                                if stream.cells.len() > 1 {
+                                    format!(" · ×{}", stream.cells.len())
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                        );
+                        theme::stat(
+                            ui,
+                            "Session",
+                            &format!("{:#06x}", stream.transfer.session_id()),
+                        );
+                    });
+            });
+
             if stream.worst_stall > Duration::from_secs(1) {
-                ui.add_space(6.0);
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xd9, 0x8a, 0x00),
-                    format!(
-                        "This window stalled for {:.1}s. Keep it visible and in front — a \
-                         throttled window freezes the stream mid-frame.",
-                        stream.worst_stall.as_secs_f32()
-                    ),
-                );
+                ui.add_space(8.0);
+                egui::Frame::new()
+                    .fill(theme::WARN.linear_multiply(0.1))
+                    .stroke(egui::Stroke::new(1.0, theme::WARN.linear_multiply(0.35)))
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "This window stalled for {:.1}s. Keep it visible and in front — \
+                                 a throttled window freezes the stream mid-frame.",
+                                stream.worst_stall.as_secs_f32()
+                            ))
+                            .size(theme::SMALL)
+                            .color(theme::WARN),
+                        );
+                    });
             }
         }
+
+        ui.add_space(16.0);
     }
 
     fn draw_stage(&mut self, ui: &mut egui::Ui) {
         match &self.stage {
             Stage::Idle => {
-                ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.32);
+                    theme::qr_motif(ui, 64.0, theme::LINE_BRIGHT);
+                    ui.add_space(18.0);
+                    ui.label(
+                        egui::RichText::new("Nothing on screen yet")
+                            .size(theme::BODY + 1.0)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(
-                            "Choose a file or type some text, then start sending.\n\
-                             Point the receiving phone's camera at the code.",
+                            "Pick a file or type some text, then start sending.\n\
+                             Point the receiving phone at this screen.",
                         )
-                        .weak(),
+                        .size(theme::SMALL)
+                        .color(theme::TEXT_FAINT),
                     );
                 });
             }
             Stage::Preparing(job) => {
-                ui.centered_and_justified(|ui| {
-                    ui.horizontal_centered(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Preparing {}…", job.label()));
-                    });
+                let label = job.label().to_owned();
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.4);
+                    ui.spinner();
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(format!("Preparing {label}…"))
+                            .size(theme::BODY)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Compressing and hashing")
+                            .size(theme::SMALL)
+                            .color(theme::TEXT_FAINT),
+                    );
                 });
+                // The packing thread has no repaint signal of its own, and the
+                // spinner has to keep turning while it works.
+                ui.ctx().request_repaint();
             }
             Stage::Streaming(_) => {
                 if let Some(texture) = &self.texture {
@@ -652,27 +786,47 @@ impl SenderApp {
     }
 }
 
-/// Draw the grid as large as it goes without smoothing or fractional modules.
+/// Draw the grid as large as it goes, on white, without smoothing or
+/// fractional modules.
 ///
-/// The integer scale is the point: at a fractional scale some modules get one
-/// pixel and their neighbours get two, which is the same defect as smoothing
-/// wearing a different hat.
+/// Three things here are decode requirements wearing the clothes of styling,
+/// and none of them is negotiable:
+///
+/// * **Integer scale.** At a fractional scale some modules get one pixel and
+///   their neighbours get two, which distorts the grid a decoder samples.
+/// * **Nearest-neighbour filtering.** A smoothed QR code is an undecodable one.
+/// * **A white surround.** The raster already carries its four-module quiet
+///   zone; the extra padding here only ever adds to it, which is why this card
+///   is the one piece of chrome allowed to touch the code.
 fn paint_codes(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
-    let available = ui.available_size();
     let [width, height] = texture.size();
     if width == 0 || height == 0 {
         return;
     }
+
+    // Padding is in screen pixels and stays white, so it reads as more quiet
+    // zone to any decoder that sees it.
+    const PAD: f32 = 18.0;
+    let available = ui.available_size() - egui::vec2(PAD * 2.0, PAD * 2.0);
     let scale = (available.x / width as f32)
         .min(available.y / height as f32)
         .floor()
         .max(1.0);
-    let size = egui::vec2(width as f32 * scale, height as f32 * scale);
-    ui.centered_and_justified(|ui| {
-        ui.add(
-            egui::Image::new(texture)
-                .fit_to_exact_size(size)
-                .texture_options(egui::TextureOptions::NEAREST),
-        );
+    let code = egui::vec2(width as f32 * scale, height as f32 * scale);
+
+    ui.vertical_centered(|ui| {
+        let leftover = ui.available_height() - code.y - PAD * 2.0;
+        ui.add_space((leftover * 0.5).max(0.0));
+        egui::Frame::new()
+            .fill(egui::Color32::WHITE)
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(PAD as i8))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(code)
+                        .texture_options(egui::TextureOptions::NEAREST),
+                );
+            });
     });
 }

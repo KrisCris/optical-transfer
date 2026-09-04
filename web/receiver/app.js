@@ -9,6 +9,10 @@
 import init, { WasmReceiver } from "./pkg/optical_wasm.js";
 
 const els = {
+  viewfinder: document.getElementById("viewfinder"),
+  percent: document.getElementById("percent"),
+  progressLabel: document.getElementById("progress-label"),
+  blocksGrid: document.getElementById("blocks-grid"),
   start: document.getElementById("start"),
   stop: document.getElementById("stop"),
   video: document.getElementById("video"),
@@ -42,6 +46,8 @@ let objectUrl = null;
 let startedAt = 0;
 let decodes = 0;
 let lastVerdict = null;
+/** Cells currently in the block grid, so it is rebuilt only when k changes. */
+let gridCells = [];
 
 /** Regions where a code was seen recently, so the next frames can be cropped
  *  to them. A crop is both cheaper to decode and more likely to succeed than a
@@ -55,6 +61,33 @@ let lastFullScan = 0;
 
 function setStatus(text) {
   els.status.textContent = text;
+}
+
+/** Drives the viewfinder's framing guides and glow. Chrome only — the decoder
+ *  reads the raw capture and never sees any of this. */
+function setViewfinder(state) {
+  els.viewfinder.dataset.state = state;
+}
+
+/** One cell per source block, rebuilt only when the stream's k changes.
+ *  Capped because a 65535-block transfer would be 65535 DOM nodes for a
+ *  texture nobody can read at that density. */
+function syncBlockGrid(total, solved) {
+  const cap = 512;
+  const cells = Math.min(total, cap);
+  if (gridCells.length !== cells) {
+    els.blocksGrid.replaceChildren();
+    gridCells = Array.from({ length: cells }, () => {
+      const cell = document.createElement("i");
+      els.blocksGrid.append(cell);
+      return cell;
+    });
+  }
+  // When capped, each cell stands for a proportional share of the blocks.
+  const lit = total > 0 ? Math.round((solved / total) * cells) : 0;
+  for (let index = 0; index < gridCells.length; index++) {
+    gridCells[index].classList.toggle("solved", index < lit);
+  }
 }
 
 function showError(text) {
@@ -125,7 +158,8 @@ async function startCamera() {
   els.start.hidden = true;
   els.stop.hidden = false;
   els.progress.hidden = false;
-  setStatus("Point the camera at the sending screen.");
+  setViewfinder("scanning");
+  setStatus("Looking for a code…");
   requestAnimationFrame(() => pump(generationAtStart));
 }
 
@@ -140,6 +174,7 @@ function stopCamera() {
   els.stop.hidden = true;
   els.progress.hidden = true;
   drawOverlay([]);
+  setViewfinder("idle");
   setStatus("Stopped.");
 }
 
@@ -284,14 +319,20 @@ function handleFrame(bytes) {
         lastVerdict = null;
         showError("");
       }
+      // Frames collected, not blocks solved. The peeling cascade back-loads:
+      // blocks resolve in a burst near the end while frames arrive steadily,
+      // so a bar driven by solved blocks looks stalled and then teleports.
       const percent = event.totalBlocks
         ? Math.min(100, Math.round((event.uniqueFrames / event.totalBlocks) * 100))
         : 0;
       els.bar.style.width = `${percent}%`;
+      els.percent.innerHTML = `${percent}<small>%</small>`;
+      els.progressLabel.textContent = "Receiving";
       els.progress.setAttribute("aria-valuenow", String(percent));
       els.frames.textContent = String(event.uniqueFrames);
       els.blocks.textContent = `${event.solvedBlocks}/${event.totalBlocks}`;
-      setStatus(`Receiving… ${percent}%`);
+      syncBlockGrid(event.totalBlocks, event.solvedBlocks);
+      setStatus("Hold steady — receiving.");
       return;
     }
     case "complete":
@@ -307,6 +348,11 @@ function handleFrame(bytes) {
 function showResult(event) {
   const seconds = (performance.now() - startedAt) / 1000;
   els.bar.style.width = "100%";
+  els.percent.innerHTML = `100<small>%</small>`;
+  els.progressLabel.textContent = "Complete";
+  els.progress.setAttribute("aria-valuenow", "100");
+  syncBlockGrid(1, 1);
+  setViewfinder("done");
   els.result.hidden = false;
   els.resultName.textContent = event.name;
   els.resultStats.textContent =
@@ -330,8 +376,10 @@ function showResult(event) {
     // second pair of hands, not the only one.
     els.resultSave.download = event.name;
   }
-  setStatus("Received.");
+  setStatus("Received and verified.");
   stopCamera();
+  // stopCamera resets the viewfinder to idle; the transfer did succeed.
+  setViewfinder("done");
 }
 
 function hideResult() {
@@ -377,6 +425,7 @@ els.start.addEventListener("click", () => void startCamera());
 els.stop.addEventListener("click", stopCamera);
 els.dismiss.addEventListener("click", () => {
   hideResult();
+  setViewfinder("idle");
   setStatus("Ready.");
 });
 window.addEventListener("pagehide", releaseObjectUrl);

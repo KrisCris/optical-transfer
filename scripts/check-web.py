@@ -31,8 +31,9 @@ SERVICE_WORKER = RECEIVER / "service-worker.js"
 # Element ids app.js binds to. Listed here so a rename in one place fails the
 # build instead of producing a receiver with a dead button.
 REQUIRED_IDS = (
-    "video", "overlay", "start", "stop", "status", "error",
-    "progress", "bar", "m-frames", "m-blocks", "m-decodes",
+    "video", "overlay", "viewfinder", "start", "stop", "status", "error",
+    "progress", "bar", "percent", "progress-label", "blocks-grid",
+    "m-frames", "m-blocks", "m-decodes",
     "result", "result-name", "result-stats", "result-text",
     "result-save", "result-copy", "dismiss",
 )
@@ -121,6 +122,11 @@ def check_structure(failures: list[str]) -> None:
         failures.append("status and error regions must be announced to a screen reader")
     if "not encrypted" not in html.lower():
         failures.append("the security warning is missing from index.html")
+    # Inline SVG icons are fine; an inline <style> or <script> is not, because
+    # the service worker precaches files and cannot version what lives in the
+    # HTML's own body.
+    if "<style" in html:
+        failures.append("index.html has an inline <style>; styles belong in styles.css")
 
 
 def main() -> int:

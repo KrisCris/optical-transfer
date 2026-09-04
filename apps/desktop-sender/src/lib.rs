@@ -8,4 +8,5 @@
 pub mod app;
 pub mod packing;
 pub mod qr;
+pub mod theme;
 pub mod transfer;
