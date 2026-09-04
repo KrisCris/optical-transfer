@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A run superseded by a newer push is wasted CI minutes on an answer nobody
+# will read.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings everywhere, not just where a local `clippy` invocation
+  # remembers to ask.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others: the whole point of a
+      # matrix here is finding out which targets are broken, not that one is.
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: windows-x86_64, os: windows-latest }
+          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-x86_64, os: macos-13 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the version and components, so nothing here
+      # names a version that could drift from it.
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      # eframe needs the X11/Wayland and GL development headers to link.
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo build -p desktop-sender --release
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+
+      - name: Build the receiver bundle
+        run: ./scripts/build-web.sh
+
+      # build-web.sh runs both of these, but running them again on their own
+      # means a failure names which contract broke.
+      - run: python3 scripts/check-vendor.py
+      - run: python3 scripts/check-web.py
+
+  release-contract:
+    name: release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-contract
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      # Packaging is checked on every push, not only on a tag. A release script
+      # that is exercised for the first time during a release is a release that
+      # fails during a release.
+      - run: ./scripts/build-web.sh
+      - run: cargo build -p desktop-sender --release
+      - name: Package and verify
+        run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          python3 scripts/package_release.py --target "$target" \
+            --binary target/release/desktop-sender
+          python3 scripts/check-release.py "dist/$target"
