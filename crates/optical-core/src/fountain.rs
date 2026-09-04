@@ -8,7 +8,33 @@ const SOLITON_DELTA: f64 = 0.5;
 const REPAIR_DEGREE_MIN: u32 = 4;
 const REPAIR_DEGREE_MAX: u32 = 24;
 
+/// Deterministic natural log: exact-ops range reduction plus an atanh series.
+///
+/// This is wire format, not a utility. The upstream baseline uses it instead of
+/// the platform `log` because an implementation-approximated logarithm can
+/// differ by an ulp between a sender's engine and a receiver's, which is enough
+/// to shift a `soliton_cdf` boundary and desynchronise the two streams. Every
+/// operation below is exactly specified by IEEE-754, so the value is identical
+/// on every target.
+///
+/// Inputs outside `(0, inf)` are answered from `f64::ln`'s own definition
+/// rather than entered into the range reduction: zero never climbs to 0.75 by
+/// doubling and infinity never falls below 1.5 by halving, so an out-of-domain
+/// caller would otherwise spin forever (or, in a debug build, panic on the
+/// exponent counter). The guard cannot fire for anything `soliton_cdf` asks
+/// for -- it only ever passes `k / 0.5` for `k >= 2` and `R / 0.5` for
+/// `R >= 1` -- so the pinned upstream vectors are unaffected.
 pub fn dlog(value: f64) -> f64 {
+    if value.is_nan() || value < 0.0 {
+        return f64::NAN;
+    }
+    if value == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if value.is_infinite() {
+        return f64::INFINITY;
+    }
+
     let mut exponent = 0;
     let mut mantissa = value;
     while mantissa >= 1.5 {
@@ -52,7 +78,7 @@ pub fn soliton_cdf(k: u16) -> Vec<f64> {
         let tau = if degree < spike {
             r / (degree_f64 * k_f64)
         } else if degree == spike {
-            r * dlog((r / SOLITON_DELTA).max(0.0)) / k_f64
+            r * dlog(r / SOLITON_DELTA).max(0.0) / k_f64
         } else {
             0.0
         };
@@ -229,18 +255,31 @@ pub struct LtDecoder {
 }
 
 impl LtDecoder {
+    /// Build a decoder for the dimensions a frame header declares.
+    ///
+    /// Every argument arrives over the optical channel, so the dimensions are
+    /// checked for internal consistency before anything is allocated. In
+    /// particular `k` must be the *minimal* block count for `total_len`:
+    /// an honest sender always emits `ceil(total_len / block_len)`, so a larger
+    /// `k` claims storage the payload cannot use. Without that bound a stream
+    /// declaring a 1 KiB payload at `k = 65535`, `block_len = 65535` would
+    /// still be entitled to roughly 4 GiB of solved-block buffers, even though
+    /// `total_len` itself is capped at 64 MiB. With it, capacity can exceed the
+    /// payload by at most one partial block.
     pub fn new(
         k: u16,
         block_len: usize,
         session_id: u16,
         total_len: usize,
     ) -> Result<Self, OpticalError> {
+        let capacity = usize::from(k).saturating_mul(block_len);
         if k == 0
             || block_len == 0
             || block_len > usize::from(u16::MAX)
             || total_len == 0
             || total_len > MAX_FILE_BYTES
-            || total_len > usize::from(k).saturating_mul(block_len)
+            || total_len > capacity
+            || total_len <= capacity - block_len
         {
             return Err(OpticalError::UnsupportedDimensions);
         }

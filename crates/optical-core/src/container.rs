@@ -89,6 +89,15 @@ pub fn pack_file(name: &str, media_type: &str, bytes: &[u8]) -> Result<PackedFil
     })
 }
 
+/// Parse a DCF2 container into its metadata and decompressed bytes.
+///
+/// The returned bytes are **not verified**. This mirrors the upstream API,
+/// where unpacking and integrity are deliberately separate steps: a caller must
+/// run [`verify_file`] against the container's own SHA-256 -- and, at a
+/// receiver, check the frame header's FNV-1a over the container first -- before
+/// treating the payload as the file that was sent. `name` and `media_type`
+/// likewise arrive over the optical channel and describe only what the other
+/// screen claimed.
 pub fn unpack_file(container: &[u8]) -> Result<OpticalFile, OpticalError> {
     if container.len() < FILE_HEADER_LEN || container[..4] != *FILE_MAGIC {
         return Err(OpticalError::InvalidContainer);

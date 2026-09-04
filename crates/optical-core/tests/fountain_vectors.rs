@@ -160,9 +160,16 @@ fn decoder_handles_clean_duplicate_redundant_and_reordered_frames() {
 
 #[test]
 fn lossy_round_trips_stay_within_recorded_bounds() {
-    let (payload, frames, wall_clock, overhead) = round_trip(512 * 1024, 2933, 23, 0.30);
+    let (payload, frames, emitted_sequences_per_block, overhead) =
+        round_trip(512 * 1024, 2933, 23, 0.30);
     assert_eq!(payload, test_payload(512 * 1024));
-    assert!(wall_clock < 2.8, "wall clock was {wall_clock:.2}");
+    // Upstream calls this quantity "wall clock", but it is sequences emitted
+    // divided by source blocks -- how much of the carousel the sender had to
+    // play, not elapsed time. Timing a decode here would measure the machine.
+    assert!(
+        emitted_sequences_per_block < 2.8,
+        "sender emitted {emitted_sequences_per_block:.2} sequences per source block"
+    );
     assert!(overhead < 1.8, "unique frame overhead was {overhead:.2}");
     assert!(frames > 0);
 }
