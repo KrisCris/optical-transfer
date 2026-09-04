@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod capacity;
 pub mod container;
 pub mod error;
 pub mod fountain;

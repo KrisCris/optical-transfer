@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "apps/desktop-sender",
   "crates/optical-core",
   "crates/optical-wasm",
 ]
