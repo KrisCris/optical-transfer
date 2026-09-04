@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Optical Transfer — Receiver</title>
+<link rel="stylesheet" href="./styles.css" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+<meta name="theme-color" content="#101418" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+</head>
+<body>
+<header>
+  <h1>Optical Transfer</h1>
+  <p class="warning" role="note">
+    <span aria-hidden="true">⚠</span>
+    Not encrypted: any camera pointed at the sending screen can read this transfer.
+  </p>
+</header>
+
+<main>
+  <section class="stage" aria-label="Camera">
+    <div class="viewfinder">
+      <video id="video" playsinline muted aria-label="Camera preview"></video>
+      <canvas id="overlay" aria-hidden="true"></canvas>
+    </div>
+    <div class="controls">
+      <button id="start" type="button" class="primary">Start camera</button>
+      <button id="stop" type="button" hidden>Stop</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">Ready.</p>
+    <p id="error" class="error" role="alert" hidden></p>
+  </section>
+
+  <section id="progress" class="progress" hidden
+           role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+           aria-label="Transfer progress">
+    <div class="track"><div id="bar" class="bar"></div></div>
+    <dl class="metrics">
+      <div><dt>Frames</dt><dd id="m-frames">0</dd></div>
+      <div><dt>Blocks</dt><dd id="m-blocks">0/0</dd></div>
+      <div><dt>Decodes</dt><dd id="m-decodes">0</dd></div>
+    </dl>
+  </section>
+
+  <section id="result" class="result" hidden aria-labelledby="result-name">
+    <h2 id="result-name"></h2>
+    <p id="result-stats" class="stats"></p>
+    <pre id="result-text" hidden></pre>
+    <div class="controls">
+      <a id="result-save" class="button primary" download hidden>Save file</a>
+      <button id="result-copy" type="button" hidden>Copy text</button>
+      <button id="dismiss" type="button">Done</button>
+    </div>
+  </section>
+
+  <details class="help">
+    <summary>It is not picking anything up</summary>
+    <ul>
+      <li>Fill about half the camera view with the code. Too far away is the usual cause.</li>
+      <li>Hold still for a moment — a moving camera blurs the modules.</li>
+      <li>Turn the sending screen's brightness up, and tilt it away from overhead lights.</li>
+      <li>On the sender, lower bytes per frame and frames per second. Fewer, larger,
+          slower codes are easier to read than dense fast ones.</li>
+      <li>If a message says the sender is a different version, update whichever device is older.</li>
+    </ul>
+  </details>
+</main>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -3,3 +3,6 @@
 /web/receiver/pkg/
 /dist/
 .DS_Store
+# Copied in by scripts/build-web.sh from the checked-in vendor/ tree, so the
+# served bundle is self-contained without the binary living in two places.
+/web/receiver/vendor/

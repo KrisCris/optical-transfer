@@ -1,0 +1,14 @@
+{
+  "name": "Optical Transfer Receiver",
+  "short_name": "Optical",
+  "description": "Receive files and text from a nearby screen through animated QR codes. No network involved.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "./icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

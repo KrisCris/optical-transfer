@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Optical Transfer">
+  <rect width="192" height="192" rx="42" fill="#101418"/>
+  <g fill="#3ddc84">
+    <rect x="34" y="34" width="46" height="46" rx="6"/>
+    <rect x="112" y="34" width="46" height="46" rx="6"/>
+    <rect x="34" y="112" width="46" height="46" rx="6"/>
+  </g>
+  <g fill="#101418">
+    <rect x="48" y="48" width="18" height="18" rx="3"/>
+    <rect x="126" y="48" width="18" height="18" rx="3"/>
+    <rect x="48" y="126" width="18" height="18" rx="3"/>
+  </g>
+  <g fill="#f2f5f8">
+    <rect x="112" y="112" width="18" height="18" rx="3"/>
+    <rect x="140" y="140" width="18" height="18" rx="3"/>
+    <rect x="112" y="140" width="18" height="18" rx="3"/>
+    <rect x="140" y="112" width="18" height="18" rx="3"/>
+  </g>
+</svg>
