@@ -1,0 +1,29 @@
+[package]
+name = "optical-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+optical-core = { path = "../optical-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "0.2.127"
+
+# The Rust 1.98 wasm target emits bulk-memory and sign-extension instructions
+# unconditionally, and wasm-pack ships a binaryen old enough to reject them
+# unless told they are expected. Every listed feature is baseline in Safari 15,
+# Chrome 75 and Firefox 79, so naming them costs no reach; turning wasm-opt off
+# instead would cost roughly a third of the module size on a phone download.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-O",
+  "--enable-bulk-memory",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+  "--enable-nontrapping-float-to-int",
+]

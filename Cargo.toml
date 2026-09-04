@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/optical-core",
+  "crates/optical-wasm",
 ]
 resolver = "3"
 

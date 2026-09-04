@@ -1,0 +1,125 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>optical-wasm decoder smoke test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  ol { padding-left: 1.4rem; }
+  li { margin: .35rem 0; }
+  .pass::marker { content: "✅ "; }
+  .fail::marker { content: "❌ "; }
+  .fail { color: #b00020; }
+  #summary { font-weight: 600; margin-top: 1rem; }
+  pre { background: color-mix(in srgb, currentColor 8%, transparent); padding: .6rem; overflow-x: auto; }
+</style>
+
+<h1>optical-wasm decoder smoke test</h1>
+<p>
+  Replays frames generated <em>outside</em> the browser by
+  <code>cargo run -p optical-wasm --example frame_fixture</code> through the
+  compiled WASM module. Every fifth frame is missing from the fixture, so a pass
+  means the fountain decoder recovered the payload from a lossy stream and both
+  integrity checks agreed — not merely that the module loaded.
+</p>
+<ol id="results"></ol>
+<p id="summary">Running…</p>
+
+<script type="module">
+  import init, { WasmReceiver } from "../pkg/optical_wasm.js";
+
+  const results = document.getElementById("results");
+  let failures = 0;
+
+  function check(name, condition, detail) {
+    const item = document.createElement("li");
+    item.className = condition ? "pass" : "fail";
+    item.textContent = name;
+    if (!condition) {
+      failures++;
+      if (detail !== undefined) {
+        const pre = document.createElement("pre");
+        pre.textContent = typeof detail === "string" ? detail : JSON.stringify(detail, null, 2);
+        item.append(pre);
+      }
+    }
+    results.append(item);
+  }
+
+  const hexToBytes = (hex) =>
+    Uint8Array.from(hex.match(/../g) ?? [], (pair) => parseInt(pair, 16));
+
+  try {
+    await init();
+    const fixture = await fetch("./frames.json").then((response) => response.json());
+    const receiver = new WasmReceiver();
+
+    // A QR code that has nothing to do with this transfer. The receiver sees
+    // these constantly — shop windows, posters — and must stay silent.
+    check(
+      "an unrelated QR payload is ignored",
+      receiver.addFrame(new TextEncoder().encode("https://example.invalid/")).kind === "ignored",
+    );
+
+    // Ours, but a wire version this build does not speak. This is the one case
+    // that must NOT be silent: it is why the version byte exists.
+    const newer = receiver.addFrame(new Uint8Array([0xd1, 0xc3, 9, 0]));
+    check(
+      "a newer wire version is named rather than ignored",
+      newer.kind === "incompatible" && newer.message.includes("9"),
+      newer,
+    );
+
+    let complete = null;
+    let progressSeen = 0;
+    for (const hex of fixture.frames) {
+      const event = receiver.addFrame(hexToBytes(hex));
+      if (event.kind === "progress") {
+        progressSeen++;
+        continue;
+      }
+      if (event.kind === "complete") {
+        complete = event;
+        break;
+      }
+      check(`unexpected event while streaming: ${event.kind}`, false, event);
+      break;
+    }
+
+    check("the lossy stream reported progress before completing", progressSeen > 0);
+    check("the lossy stream completed", complete !== null, complete);
+
+    if (complete) {
+      check("the recovered name matches", complete.name === fixture.name, complete.name);
+      check(
+        "the recovered media type matches",
+        complete.mediaType === fixture.mediaType,
+        complete.mediaType,
+      );
+      check("the payload is flagged as text", complete.isText === true, complete);
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(
+        new Uint8Array(complete.bytes),
+      );
+      check("the recovered text is byte-identical", text === fixture.text, text);
+    }
+
+    // Completion clears the stream, so the same fixture decodes again from a
+    // receiver that was never explicitly reset.
+    let second = null;
+    for (const hex of fixture.frames) {
+      const event = receiver.addFrame(hexToBytes(hex));
+      if (event.kind === "complete") {
+        second = event;
+        break;
+      }
+    }
+    check("a second transfer runs on the same receiver", second !== null);
+  } catch (error) {
+    check(`the test harness itself threw: ${error}`, false, String(error?.stack ?? error));
+  }
+
+  const summary = document.getElementById("summary");
+  summary.textContent = failures === 0 ? "PASS — all checks green" : `FAIL — ${failures} check(s) failed`;
+  document.title = failures === 0 ? "PASS optical-wasm" : "FAIL optical-wasm";
+  globalThis.__opticalWasmResult = { failures };
+</script>
