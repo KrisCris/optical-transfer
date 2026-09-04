@@ -26,6 +26,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Kept in step with the workspace manifest by hand; there is one number and it
+# only moves on a release.
+VERSION = "0.1.0"
+
 
 def git(*args: str) -> str:
     return subprocess.run(
@@ -39,6 +43,48 @@ def digest(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             sha.update(chunk)
     return sha.hexdigest()
+
+
+APP_NAME = "Optical Transfer"
+BUNDLE_ID = "org.opticaltransfer.sender"
+
+
+def make_macos_bundle(staging: Path, binary: Path, version: str) -> Path:
+    """Wrap the sender in a .app so macOS treats it as an application.
+
+    A bare Mach-O binary is not an application on this platform. Double-clicked
+    from Finder it opens a Terminal window instead of the program; it gets no
+    Dock icon, no bundle identifier, and no place in the app switcher. None of
+    that is cosmetic — a user who downloads a zip and double-clicks the file
+    inside it should get the sender, not a shell.
+    """
+    app = staging / f"{APP_NAME}.app"
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    shutil.copy2(binary, macos / "desktop-sender")
+    (macos / "desktop-sender").chmod(0o755)
+    (app / "Contents" / "Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "  <key>CFBundleName</key><string>" + APP_NAME + "</string>\n"
+        "  <key>CFBundleDisplayName</key><string>" + APP_NAME + "</string>\n"
+        "  <key>CFBundleIdentifier</key><string>" + BUNDLE_ID + "</string>\n"
+        "  <key>CFBundleExecutable</key><string>desktop-sender</string>\n"
+        "  <key>CFBundlePackageType</key><string>APPL</string>\n"
+        "  <key>CFBundleVersion</key><string>" + version + "</string>\n"
+        "  <key>CFBundleShortVersionString</key><string>" + version + "</string>\n"
+        "  <key>LSMinimumSystemVersion</key><string>11.0</string>\n"
+        # The sender's whole job is to be looked at, so it must not be
+        # eligible for App Nap or display sleep while it is streaming.
+        "  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>\n"
+        "  <key>NSHighResolutionCapable</key><true/>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+    return app
 
 
 def copy_receiver(destination: Path) -> None:
@@ -89,8 +135,11 @@ def main() -> int:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    shutil.copy2(binary, staging / binary.name)
-    (staging / binary.name).chmod(0o755)
+    if "apple-darwin" in args.target:
+        make_macos_bundle(staging, binary, VERSION)
+    else:
+        shutil.copy2(binary, staging / binary.name)
+        (staging / binary.name).chmod(0o755)
     for name in ("LICENSE", "NOTICE.md", "README.md"):
         shutil.copy2(ROOT / name, staging / name)
     copy_receiver(staging / "receiver")
