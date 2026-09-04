@@ -1,3 +1,5 @@
-.worktrees/
-.superpowers/
+/target/
+/.tooling/
+/web/receiver/pkg/
+/dist/
 .DS_Store
