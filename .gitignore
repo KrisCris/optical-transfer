@@ -1,3 +1,9 @@
+# Linked worktrees and subagent workflow artifacts. These were ignored by
+# 90baec9 ("Keep execution workspaces outside project history"); Task 1 then
+# wrote .gitignore fresh rather than adding to it, which silently undid that.
+.worktrees/
+.superpowers/
+
 /target/
 /.tooling/
 /web/receiver/pkg/
