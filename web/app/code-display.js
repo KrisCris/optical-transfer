@@ -10,6 +10,9 @@
 //    flip loses at most one code instead of all of them.
 //  * Every cell that has come due flips on the same animation frame: deferring
 //    to one flip per frame would cap codes × fps at the display refresh rate.
+//    No cell flips twice in one frame, though: the first code would be painted
+//    over before any camera saw it. Asking for more fps than the display
+//    refreshes therefore runs at the refresh rate, and the flip count says so.
 
 /** The `cols × rows` tiling of `codes` square cells of `cell` modules that
  *  gives each module the most CSS pixels in a `width × height` box. `fit` is
@@ -99,7 +102,7 @@ export class CodeDisplay {
     if (gap > 1000) this.stall = Math.max(this.stall, gap);
     if (now < this.nextAt) return;
     if (now - this.nextAt > this.interval) this.nextAt = now;
-    while (now >= this.nextAt) {
+    for (let placed = 0; placed < this.codes && now >= this.nextAt; placed++) {
       const frame = this.queue.shift();
       if (!frame) {
         this.nextAt = now + this.subInterval;

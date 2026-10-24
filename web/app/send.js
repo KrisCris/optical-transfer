@@ -11,7 +11,7 @@ const PRESETS = {
   max: { bytes: 2953, fps: 60, codes: 4 },
 };
 const BYTES_OPTIONS = [500, 1000, 1465, 1850, 2331, 2953];
-const FPS_OPTIONS = [10, 15, 20, 24, 30, 55, 60];
+const FPS_OPTIONS = [10, 15, 20, 24, 30, 55, 60, 120];
 const CODES_OPTIONS = [1, 2, 4, 6, 9];
 const HEADER_BYTES = 22;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -295,7 +295,10 @@ function statsLoop() {
   els.flips.textContent = `${actual} / ${target} per s`;
   els.flips.classList.toggle("warn", actual < target * 0.9 && display.shown > target);
   const hz = display.refreshHz();
-  els.display.textContent = hz ? `${Math.round(hz)} Hz${hz < settings.fps * 1.5 && settings.fps > 30 ? " · 1 refresh per frame" : ""}` : "—";
+  const note = !hz ? "" : hz < settings.fps * 0.95 ? ` · caps ${Math.round(hz)} fps`
+    : hz < settings.fps * 1.5 && settings.fps > 30 ? " · 1 refresh per frame" : "";
+  els.display.textContent = hz ? `${Math.round(hz)} Hz${note}` : "—";
+  els.display.classList.toggle("warn", Boolean(hz) && hz < settings.fps * 0.95);
   if (display.stall) setStatus(`This window stalled for ${(display.stall / 1000).toFixed(1)} s. Keep it visible and in front.`);
 }
 

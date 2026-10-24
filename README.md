@@ -63,7 +63,10 @@ default:
 | Fast | 1 | 60 | 2953 | 172 KiB/s |
 | Max | 4 | 60 | 2953 | 687 KiB/s |
 
-*Fine-tune* sets each value directly, including the error-correction level.
+*Fine-tune* sets each value directly, including the error-correction level
+and 120 fps for a display that refreshes at least that fast. A code never
+changes twice within one refresh, so on a slower display the stream runs at
+the refresh rate and the sender's Display line says so.
 Frame rate and code count change a running stream in place. Bytes per code and
 ECC are baked into every frame, so changing them restarts the stream with a
 new session. A payload smaller than one full code is sent at its own size, so
@@ -96,13 +99,15 @@ presets. Tap the code for full screen. The page holds a screen wake lock where
 the browser allows one. There is no acknowledgement channel, so stop when the
 receiver shows the file.
 
-*Receive* opens the rear camera at 60 fps where the device allows it. On a
+*Receive* opens the rear camera at 60 fps where the device allows it; the
+settings popover can ask for 30 or 120 instead, and the telemetry's Camera
+line shows the rate delivered and the camera's ceiling. On a
 Mac, an iPhone on the same Apple Account shows up as a Continuity Camera, and
 the receiver opens it automatically when no camera has been picked; the Mac's
 cores then do the decoding. The first start on a Mac may still open the
 built-in camera, because browsers hide camera names until permission is
-granted. The settings popover picks the camera, capture width and decode
-worker count, and the choice of camera is remembered.
+granted. The settings popover picks the camera, capture width, capture rate
+and decode worker count, and the choice of camera is remembered.
 
 **What the receiver shows.** The transfer card has recovered percent, current
 rate, time remaining and elapsed time. Under them sit a one-minute chart of

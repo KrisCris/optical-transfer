@@ -35,8 +35,10 @@ pub const FRAME_BYTES_OPTIONS: [usize; 6] = [500, 1000, 1465, 1850, 2331, 2953];
 /// 55 sits just under the 60 Hz ceiling on purpose: on a 120 Hz display it gets
 /// a clean two refresh cycles per frame, and on a 60 Hz screen the deliberate
 /// 5 fps slip against the refresh clock means frame boundaries drift through
-/// the scanout instead of riding it.
-pub const TX_FPS_OPTIONS: [u32; 7] = [10, 15, 20, 24, 30, 55, 60];
+/// the scanout instead of riding it. 120 is for high-refresh displays and a
+/// receiver capturing at 120; on a slower display it runs at the refresh rate.
+/// The rate is the sender's pacing only and never reaches the wire.
+pub const TX_FPS_OPTIONS: [u32; 8] = [10, 15, 20, 24, 30, 55, 60, 120];
 
 /// The pair upstream's own no-signal hint walks a struggling sender down to.
 ///

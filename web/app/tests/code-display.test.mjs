@@ -43,8 +43,22 @@ test("codes × fps is not capped by the refresh rate: due cells share a frame", 
   const view = display(4, 60);
   run(view, 60, 2);
   // 240 codes a second on a 60 Hz screen; a one-flip-per-frame clock gives 120.
-  assert.ok(view.shown >= 470 && view.shown <= 484, `shown ${view.shown}`);
+  // A frame that lands a hair early flips three cells, and the fourth cannot be
+  // made up without painting one cell twice, so a few flips go missing.
+  assert.ok(view.shown >= 460 && view.shown <= 484, `shown ${view.shown}`);
   assert.deepEqual(view.flips.slice(0, 8), [0, 1, 2, 3, 0, 1, 2, 3], "cells flip in turn");
+});
+
+test("a rate above the refresh rate runs at the refresh rate, never painting over a code", () => {
+  const view = display(1, 120);
+  const flipsAt = [];
+  view.paint = (cell) => flipsAt.push(view.lastTick);
+  run(view, 60, 2);
+  assert.equal(new Set(flipsAt).size, flipsAt.length, "a cell flipped twice in one frame");
+  assert.ok(flipsAt.length >= 118 && flipsAt.length <= 121, `flips ${flipsAt.length}`);
+  const fast = display(1, 120);
+  run(fast, 144, 2);
+  assert.ok(fast.shown >= 236 && fast.shown <= 242, `a 144 Hz screen reaches 120: ${fast.shown}`);
 });
 
 test("cells flip staggered, not together, when the refresh rate allows it", () => {

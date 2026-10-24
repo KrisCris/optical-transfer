@@ -196,7 +196,13 @@ impl FlipClock {
         if now.saturating_duration_since(self.next_at) > self.interval {
             self.next_at = now;
         }
-        while now >= self.next_at {
+        // Every due cell flips on this frame, but none twice: a second flip
+        // before the next vsync paints over a code no camera ever saw, so a
+        // rate above the refresh rate runs at the refresh rate, visibly.
+        for _ in 0..self.codes {
+            if now < self.next_at {
+                break;
+            }
             let Some(frame) = pull() else {
                 self.starved += 1;
                 self.next_at = now + self.sub_interval;

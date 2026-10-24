@@ -71,8 +71,15 @@
               <option value="1920">1920 px</option>
             </select>
           </label>
+          <label>Capture rate
+            <select id="rx-fps">
+              <option value="30">30 fps</option>
+              <option value="60" selected>60 fps</option>
+              <option value="120">120 fps</option>
+            </select>
+          </label>
           <label>Decode workers <select id="rx-workers"></select></label>
-          <p class="fine">Width and camera apply on the next start. Workers apply immediately.</p>
+          <p class="fine">Changes apply at once and keep the transfer. A camera that cannot reach the rate runs as fast as it can; Camera in the telemetry shows what it delivers and its ceiling.</p>
         </div>
       </details>
     </div>
@@ -233,7 +240,7 @@
             <select id="tx-ecc"><option>L</option><option>M</option><option>Q</option><option>H</option></select>
           </label>
         </div>
-        <p class="fine">Denser codes and higher rates need a steadier, closer camera. A 60 Hz display shows each frame at 60 fps for one refresh only; drop to 30 if the receiver struggles.</p>
+        <p class="fine">Denser codes and higher rates need a steadier, closer camera. A 60 Hz display shows each frame at 60 fps for one refresh only; drop to 30 if the receiver struggles. 120 fps needs a display that refreshes at least that fast (Safari holds pages to 60 Hz unless its “Prefer Page Rendering Updates near 60fps” feature flag is off) and a receiver capturing at 120.</p>
       </details>
       <div class="actions">
         <button id="tx-start" type="button" class="btn primary">Start sending</button>

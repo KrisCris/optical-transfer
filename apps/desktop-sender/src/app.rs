@@ -1186,12 +1186,15 @@ impl StreamStats {
                 format!("{flips} / {target} per s"),
                 if slow { theme::WARN } else { plain },
             ),
-            (
-                live.clock
-                    .refresh_hz()
-                    .map_or("—".to_owned(), |hz| format!("{hz:.0} Hz")),
-                plain,
-            ),
+            match live.clock.refresh_hz() {
+                None => ("—".to_owned(), plain),
+                // Each cell flips at most once per refresh, so the display
+                // caps the frame rate; say so rather than look like a fault.
+                Some(hz) if hz < f64::from(settings.frames_per_second) * 0.95 => {
+                    (format!("{hz:.0} Hz · caps {hz:.0} fps"), theme::WARN)
+                }
+                Some(hz) => (format!("{hz:.0} Hz"), plain),
+            },
         ];
         Self {
             cycle: cycle_text,

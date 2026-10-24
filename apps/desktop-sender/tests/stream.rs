@@ -29,6 +29,31 @@ fn codes_times_fps_is_not_capped_by_the_refresh_rate() {
 }
 
 #[test]
+fn a_rate_above_the_refresh_rate_runs_at_the_refresh_rate() {
+    let start = Instant::now();
+    let mut clock = FlipClock::new(120, 1, start);
+    let flips = run(&mut clock, start, 60.0, 2.0);
+    // A second flip inside one vsync would paint over a code nobody saw.
+    let mut per_frame = std::collections::HashMap::new();
+    for (at, _) in &flips {
+        *per_frame.entry(*at).or_insert(0) += 1;
+    }
+    assert!(
+        per_frame.values().all(|count| *count == 1),
+        "a cell flipped twice in one frame"
+    );
+    assert!((118..=121).contains(&flips.len()), "{} flips", flips.len());
+
+    let mut clock = FlipClock::new(120, 1, start);
+    let flips = run(&mut clock, start, 144.0, 2.0);
+    assert!(
+        (236..=242).contains(&flips.len()),
+        "a 144 Hz display reaches 120: {} flips",
+        flips.len()
+    );
+}
+
+#[test]
 fn cells_flip_staggered_when_the_display_is_fast_enough() {
     let start = Instant::now();
     let mut clock = FlipClock::new(30, 2, start);

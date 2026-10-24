@@ -30,7 +30,7 @@ const els = {
   viewfinder: $("rx-viewfinder"), video: $("rx-video"), overlay: $("rx-overlay"),
   hudState: $("rx-hud-state"), hudRate: $("rx-hud-rate"), hudBar: $("rx-hud-bar"),
   start: $("rx-start"), stop: $("rx-stop"), settings: $("rx-settings"),
-  camera: $("rx-camera"), width: $("rx-width"), workers: $("rx-workers"),
+  camera: $("rx-camera"), width: $("rx-width"), fps: $("rx-fps"), workers: $("rx-workers"),
   status: $("rx-status"), error: $("rx-error"), hint: $("rx-hint"),
   phase: $("rx-phase"), percent: $("rx-percent"), speed: $("rx-speed"), eta: $("rx-eta"),
   elapsed: $("rx-elapsed"), progress: $("rx-progress"), bar: $("rx-bar"),
@@ -78,6 +78,13 @@ els.workers.value = String(maxWorkers);
 els.workers.addEventListener("change", () => {
   if (running) pool.resize(Number(els.workers.value));
 });
+// Both are fixed when the camera opens, so a change reopens it; the receiver
+// and its progress are untouched.
+for (const select of [els.width, els.fps]) {
+  select.addEventListener("change", () => {
+    if (running) void restartCamera();
+  });
+}
 document.addEventListener("click", (event) => {
   if (els.settings.open && !els.settings.contains(event.target)) els.settings.open = false;
 });
@@ -158,9 +165,12 @@ navigator.mediaDevices?.addEventListener?.("devicechange", async () => {
 // ------------------------------------------------------------------ camera
 
 /** iOS treats `frameRate: {ideal: 60}` as a suggestion and delivers 30, so
- *  demand it exactly first and relax only when the camera refuses. */
+ *  demand the rate exactly first and relax only when the camera refuses.
+ *  Phones reach 120 fps only in their 16:9 formats, so the 4:3 size is a
+ *  preference the exact rate is allowed to override. */
 async function acquireCamera() {
   const width = Number(els.width.value);
+  const fps = Number(els.fps.value);
   const device = await preferredCamera();
   const base = {
     ...(device ? { deviceId: { exact: device } } : { facingMode: { ideal: "environment" } }),
@@ -168,10 +178,10 @@ async function acquireCamera() {
     height: { ideal: Math.round((width * 3) / 4) },
   };
   try {
-    return await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: 60 } } });
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { exact: fps } } });
   } catch (error) {
     if (error?.name !== "OverconstrainedError" && error?.name !== "NotReadableError") throw error;
-    return navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { ideal: 60 } } });
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, frameRate: { ideal: fps } } });
   }
 }
 
@@ -515,10 +525,14 @@ function render(now, force = false) {
   t("latency").title = "Tracked crop · crop · full frame, milliseconds per decode";
   t("dropped").textContent = totals.captures
     ? `${totals.dropped} (${((totals.dropped / totals.captures) * 100).toFixed(0)}%)` : "—";
-  const settings = stream?.getVideoTracks()[0]?.getSettings?.();
+  const track = stream?.getVideoTracks()[0];
+  const settings = track?.getSettings?.();
   if (settings) {
-    t("camera").textContent = `${settings.width}×${settings.height} @ ${Math.round(settings.frameRate ?? 0)}`;
-    t("camera").title = stream.getVideoTracks()[0].label;
+    // The ceiling says whether a higher capture rate is worth asking for.
+    const ceiling = Math.round(track.getCapabilities?.().frameRate?.max ?? 0);
+    const rate = Math.round(settings.frameRate ?? 0);
+    t("camera").textContent = `${settings.width}×${settings.height} @ ${rate}${ceiling > rate ? ` (max ${ceiling})` : ""}`;
+    t("camera").title = track.label;
   }
   if (pool.version) $("t-decoder").textContent = `zxing ${pool.version}`;
 
