@@ -10,7 +10,7 @@
 // served stale across versions, and nothing revalidates over a network that
 // may not exist.
 
-const VERSION = "optical-receiver-v1";
+const VERSION = "optical-transfer-v9";
 
 // Every file the receiver needs to reach its camera-ready screen. Checked
 // against the served tree by scripts/check-web.py, so a new asset that is not
@@ -20,7 +20,15 @@ const ASSETS = [
   "./index.html",
   "./styles.css",
   "./app.js",
-  "./worker.js",
+  "./receive.js",
+  "./capture.js",
+  "./decode-worker.js",
+  "./telemetry.js",
+  "./charts.js",
+  "./format.js",
+  "./send.js",
+  "./code-display.js",
+  "./send-worker.js",
   "./manifest.webmanifest",
   "./icons/icon.svg",
   "./pkg/optical_wasm.js",

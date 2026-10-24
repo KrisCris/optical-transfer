@@ -6,7 +6,7 @@
 //! of "native and browser agree" worth asserting.
 //!
 //!     cargo run -p optical-wasm --example frame_fixture \
-//!       > web/receiver/tests/frames.json
+//!       > web/app/tests/frames.json
 
 use optical_core::{
     fountain::LtEncoder,

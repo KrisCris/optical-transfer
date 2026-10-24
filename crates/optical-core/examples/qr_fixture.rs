@@ -8,14 +8,14 @@
 //! the only honest way to ask it is to hand the modules to the same zxing-cpp
 //! build the receiver ships and see what comes back.
 //!
-//!     cargo run -q -p desktop-sender --example qr_fixture \
-//!       > web/receiver/tests/qr-frames.json
+//!     cargo run -q -p optical-core --example qr_fixture \
+//!       > web/app/tests/qr-frames.json
 
-use desktop_sender::{
+use optical_core::{
+    protocol::SplitMix32,
     qr::Ecc,
     transfer::{Transfer, TransferSettings},
 };
-use optical_core::protocol::SplitMix32;
 
 /// Small codes keep the fixture readable; the geometry is what is under test,
 /// not the density.
@@ -67,10 +67,7 @@ fn main() {
     println!("  \"frameBytes\": {FRAME_BYTES},");
     println!("  \"size\": {size},");
     println!("  \"version\": {},", renderer.locked_version().unwrap_or(0));
-    println!(
-        "  \"quietZone\": {},",
-        desktop_sender::qr::QUIET_ZONE_MODULES
-    );
+    println!("  \"quietZone\": {},", optical_core::qr::QUIET_ZONE_MODULES);
     println!("  \"frames\": [");
     for (index, frame) in frames.iter().enumerate() {
         let comma = if index + 1 == frames.len() { "" } else { "," };

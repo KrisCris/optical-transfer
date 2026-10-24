@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Optical Transfer</title>
+<meta name="description" content="Move files between devices with a screen and a camera. No network, no pairing." />
+<link rel="stylesheet" href="./styles.css" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+<meta name="theme-color" content="#0a0c0f" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2.5" y="2.5" width="7" height="7" rx="1.5" />
+      <rect x="14.5" y="2.5" width="7" height="7" rx="1.5" />
+      <rect x="2.5" y="14.5" width="7" height="7" rx="1.5" />
+      <path d="M14.5 14.5h3v3h-3zM18.5 18.5h3v3h-3z" />
+    </svg>
+    <span class="brand-name">Optical&nbsp;Transfer</span>
+  </div>
+  <nav class="modes" role="tablist" aria-label="Mode">
+    <button id="mode-receive" type="button" role="tab" aria-selected="true" aria-controls="panel-receive">Receive</button>
+    <button id="mode-send" type="button" role="tab" aria-selected="false" aria-controls="panel-send" tabindex="-1">Send</button>
+  </nav>
+  <span class="chip warn" aria-label="Not encrypted" title="Anyone with a camera pointed at the sending screen can read the transfer.">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 21h20L12 3Zm0 6v5m0 3v.01" /></svg>
+    <span class="chip-label">Not encrypted</span>
+  </span>
+</header>
+
+<!-- ============================== RECEIVE ============================== -->
+<main id="panel-receive" class="layout" role="tabpanel" aria-labelledby="mode-receive">
+
+  <section class="column stage-column" aria-label="Camera">
+    <div id="rx-viewfinder" class="viewfinder" data-state="idle">
+      <video id="rx-video" playsinline muted aria-label="Camera preview"></video>
+      <canvas id="rx-overlay" aria-hidden="true"></canvas>
+      <div class="vf-idle" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" /></svg>
+        <p>Point the camera at the sending screen</p>
+      </div>
+      <div class="vf-hud" aria-hidden="true">
+        <span id="rx-hud-state" class="hud-pill">Idle</span>
+        <span id="rx-hud-rate" class="hud-pill mono"></span>
+      </div>
+      <div class="vf-progress"><div id="rx-hud-bar"></div></div>
+    </div>
+
+    <div class="actions">
+      <button id="rx-start" type="button" class="btn primary">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2.3l1.6-2.2h7.2L17.2 7h2.3A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" /><circle cx="12" cy="13" r="3.5" /></svg>
+        Start camera
+      </button>
+      <button id="rx-stop" type="button" class="btn" hidden>Stop</button>
+      <details id="rx-settings" class="popover">
+        <summary class="btn icon-only" aria-label="Camera settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></svg>
+        </summary>
+        <div class="popover-body">
+          <label>Camera <select id="rx-camera"><option value="">Rear (automatic)</option></select></label>
+          <label>Capture width
+            <select id="rx-width">
+              <option value="960">960 px</option>
+              <option value="1280" selected>1280 px</option>
+              <option value="1920">1920 px</option>
+            </select>
+          </label>
+          <label>Decode workers <select id="rx-workers"></select></label>
+          <p class="fine">Width and camera apply on the next start. Workers apply immediately.</p>
+        </div>
+      </details>
+    </div>
+
+    <p id="rx-status" class="status" role="status" aria-live="polite">Ready when you are.</p>
+    <p id="rx-error" class="alert" role="alert" hidden></p>
+
+    <aside id="rx-hint" class="callout" hidden>
+      <strong>Nothing decoded yet.</strong>
+      <ul>
+        <li>Fill about half the camera view with the code and hold still.</li>
+        <li>Turn the sending screen's brightness up; avoid reflections.</li>
+        <li>On the sender, choose the <b>Reliable</b> preset (1465 B at 24 fps).</li>
+      </ul>
+    </aside>
+  </section>
+
+  <section class="column data-column" aria-label="Transfer">
+    <article id="rx-result" class="card result" hidden aria-labelledby="rx-result-name">
+      <div class="result-head">
+        <span class="badge ok"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>SHA-256 verified</span>
+        <h2 id="rx-result-name">—</h2>
+        <p id="rx-result-meta" class="mono dim">—</p>
+      </div>
+      <img id="rx-result-image" alt="Received image preview" hidden />
+      <pre id="rx-result-text" hidden></pre>
+      <div class="actions">
+        <a id="rx-save" class="btn primary" download>Save</a>
+        <button id="rx-share" type="button" class="btn" hidden>Share</button>
+        <button id="rx-copy" type="button" class="btn" hidden>Copy text</button>
+        <button id="rx-again" type="button" class="btn ghost">Receive another</button>
+      </div>
+    </article>
+
+    <article class="card transfer">
+      <header class="card-head">
+        <h2>Transfer</h2>
+        <span id="rx-phase" class="tag">Waiting</span>
+      </header>
+      <div class="headline">
+        <div class="big">
+          <span id="rx-percent" class="mono">0</span><small>%</small>
+        </div>
+        <dl class="kpis">
+          <div><dt>Now</dt><dd id="rx-speed" class="mono">—</dd></div>
+          <div><dt>Remaining</dt><dd id="rx-eta" class="mono">—</dd></div>
+          <div><dt>Elapsed</dt><dd id="rx-elapsed" class="mono">—</dd></div>
+        </dl>
+      </div>
+      <div class="meter" role="progressbar" aria-label="Blocks recovered" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="rx-progress">
+        <div id="rx-bar"></div>
+      </div>
+
+      <figure class="chart">
+        <figcaption><span>Recovered data rate</span><span id="rx-chart-scale" class="mono dim"></span></figcaption>
+        <canvas id="rx-chart" aria-hidden="true"></canvas>
+      </figure>
+
+      <figure class="chart">
+        <figcaption><span>Source blocks</span><span id="rx-map-label" class="mono dim">—</span></figcaption>
+        <canvas id="rx-map" class="block-map" aria-hidden="true"></canvas>
+      </figure>
+    </article>
+
+    <article class="card telemetry">
+      <header class="card-head">
+        <h2>Telemetry</h2>
+        <span id="t-decoder" class="mono dim"></span>
+      </header>
+      <div class="tgrid">
+        <section>
+          <h3>Stream</h3>
+          <dl>
+            <div><dt>Payload</dt><dd id="t-size">—</dd></div>
+            <div><dt>Blocks (k)</dt><dd id="t-k">—</dd></div>
+            <div><dt>Block size</dt><dd id="t-blocklen">—</dd></div>
+            <div><dt>Unique / dup</dt><dd id="t-frames">—</dd></div>
+            <div><dt>Redundant</dt><dd id="t-redundant">—</dd></div>
+            <div><dt>Parked eqs</dt><dd id="t-pending">—</dd></div>
+            <div><dt>Eliminations</dt><dd id="t-elim">—</dd></div>
+            <div><dt>Catch rate</dt><dd id="t-catch">—</dd></div>
+            <div><dt>Overhead</dt><dd id="t-overhead">—</dd></div>
+            <div><dt>Avg / peak</dt><dd id="t-avgpeak">—</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h3>Pipeline</h3>
+          <dl>
+            <div><dt>Capture</dt><dd id="t-capture">—</dd></div>
+            <div><dt>Decode jobs</dt><dd id="t-decode">—</dd></div>
+            <div><dt>Codes read</dt><dd id="t-symbols">—</dd></div>
+            <div><dt>Codes locked</dt><dd id="t-codes">—</dd></div>
+            <div><dt>Scan mode</dt><dd id="t-mode">—</dd></div>
+            <div><dt>Workers</dt><dd id="t-workers">—</dd></div>
+            <div><dt>Tracked hits</dt><dd id="t-tracked">—</dd></div>
+            <div><dt>Latency</dt><dd id="t-latency">—</dd></div>
+            <div><dt>Dropped</dt><dd id="t-dropped">—</dd></div>
+            <div><dt>Camera</dt><dd id="t-camera">—</dd></div>
+          </dl>
+        </section>
+      </div>
+    </article>
+  </section>
+</main>
+
+<!-- ================================ SEND ================================ -->
+<main id="panel-send" class="layout" role="tabpanel" aria-labelledby="mode-send" hidden>
+
+  <section class="column data-column" aria-label="What to send">
+    <article class="card">
+      <header class="card-head">
+        <h2>Send</h2>
+        <div class="segmented small" role="radiogroup" aria-label="Payload">
+          <label><input type="radio" name="tx-kind" value="files" checked /><span>Files</span></label>
+          <label><input type="radio" name="tx-kind" value="text" /><span>Text</span></label>
+        </div>
+      </header>
+
+      <div id="tx-files-panel">
+        <label id="tx-drop" class="dropzone">
+          <input id="tx-files" type="file" multiple />
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" /></svg>
+          <span><b>Choose files</b> or drop them here</span>
+          <small>Several files travel as one transfer.zip · 64 MiB total</small>
+        </label>
+        <div class="row">
+          <label class="btn ghost small" id="tx-folder-button">
+            <input id="tx-folder" type="file" webkitdirectory multiple />
+            Add a folder
+          </label>
+          <span id="tx-summary" class="dim mono">Nothing selected</span>
+          <button id="tx-clear" type="button" class="btn ghost small" disabled>Clear</button>
+        </div>
+        <ul id="tx-list" class="file-list"></ul>
+      </div>
+
+      <div id="tx-text-panel" hidden>
+        <textarea id="tx-text" rows="8" placeholder="Type or paste anything…" spellcheck="false"></textarea>
+        <p class="fine"><span id="tx-text-count" class="mono">0 B</span> of 4 MiB</p>
+      </div>
+    </article>
+
+    <article class="card">
+      <header class="card-head"><h2>Speed</h2><span id="tx-preset-rate" class="mono dim"></span></header>
+      <div class="presets" role="radiogroup" aria-label="Transmission preset">
+        <label><input type="radio" name="tx-preset" value="reliable" /><span><b>Reliable</b><small>1 code · 24 fps</small></span></label>
+        <label><input type="radio" name="tx-preset" value="balanced" /><span><b>Balanced</b><small>2 codes · 30 fps</small></span></label>
+        <label><input type="radio" name="tx-preset" value="fast" checked /><span><b>Fast</b><small>1 code · 60 fps</small></span></label>
+        <label><input type="radio" name="tx-preset" value="max" /><span><b>Max</b><small>4 codes · 60 fps</small></span></label>
+      </div>
+      <details class="advanced">
+        <summary>Fine-tune</summary>
+        <div class="fields">
+          <label>Bytes / code <select id="tx-bytes"></select></label>
+          <label>Frames / s <select id="tx-fps"></select></label>
+          <label>Codes on screen <select id="tx-codes"></select></label>
+          <label>Error correction
+            <select id="tx-ecc"><option>L</option><option>M</option><option>Q</option><option>H</option></select>
+          </label>
+        </div>
+        <p class="fine">Denser codes and higher rates need a steadier, closer camera. A 60 Hz display shows each frame at 60 fps for one refresh only; drop to 30 if the receiver struggles.</p>
+      </details>
+      <div class="actions">
+        <button id="tx-start" type="button" class="btn primary">Start sending</button>
+        <button id="tx-stop" type="button" class="btn" hidden>Stop</button>
+      </div>
+      <p id="tx-status" class="status" role="status" aria-live="polite"></p>
+      <p id="tx-error" class="alert" role="alert" hidden></p>
+    </article>
+  </section>
+
+  <section class="column stage-column" aria-label="Code stream">
+    <div id="tx-stage" class="qr-stage" data-state="idle">
+      <canvas id="tx-canvas" aria-label="Animated QR stream"></canvas>
+      <div class="qr-idle">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="6" height="6" rx="1" /><rect x="14.5" y="3.5" width="6" height="6" rx="1" /><rect x="3.5" y="14.5" width="6" height="6" rx="1" /><path d="M14.5 14.5h2v2h-2zM18.5 18.5h2v2h-2z" /></svg>
+        <p>The code stream appears here.</p>
+      </div>
+      <button id="tx-exit" type="button" class="btn exit" hidden>Exit full screen</button>
+    </div>
+    <div class="actions">
+      <button id="tx-fullscreen" type="button" class="btn" disabled>Full screen</button>
+      <span class="dim fine">Tap the code or press Esc to leave full screen.</span>
+    </div>
+
+    <article class="card telemetry">
+      <header class="card-head"><h2>Stream</h2><span id="s-session" class="mono dim"></span></header>
+      <div class="meter thin" aria-hidden="true"><div id="s-cycle-bar"></div></div>
+      <p class="fine"><span id="s-cycle">—</span></p>
+      <dl class="tgrid-flat">
+        <div><dt>Payload</dt><dd id="s-payload">—</dd></div>
+        <div><dt>Compression</dt><dd id="s-compression">—</dd></div>
+        <div><dt>Code</dt><dd id="s-code">—</dd></div>
+        <div><dt>Blocks (k)</dt><dd id="s-k">—</dd></div>
+        <div><dt>Raw rate</dt><dd id="s-rate">—</dd></div>
+        <div><dt>Best case</dt><dd id="s-ideal">—</dd></div>
+        <div><dt>Frames shown</dt><dd id="s-frames">—</dd></div>
+        <div><dt>Flip rate</dt><dd id="s-flips">—</dd></div>
+        <div><dt>Display</dt><dd id="s-display">—</dd></div>
+      </dl>
+    </article>
+  </section>
+</main>
+
+<footer class="footnote">
+  No network between the devices. Every file is checked twice — FNV-1a over the stream and SHA-256 over the file — before it is shown.
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

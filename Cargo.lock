@@ -763,8 +763,6 @@ dependencies = [
  "eframe",
  "mime_guess",
  "optical-core",
- "optical-wasm",
- "qrcodegen",
  "rand",
  "rfd",
 ]
@@ -2283,6 +2281,7 @@ name = "optical-core"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "qrcodegen",
  "sha2",
 ]
 

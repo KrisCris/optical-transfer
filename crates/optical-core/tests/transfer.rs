@@ -3,14 +3,12 @@
 //! upstream; everything above it is pixels. This is the seam where a mistake
 //! would produce a stream that looks perfect and decodes to nothing.
 
-use desktop_sender::{
-    qr::{Ecc, QUIET_ZONE_MODULES, QrFrame},
-    transfer::{FRAME_BYTES_OPTIONS, StartError, TX_FPS_OPTIONS, Transfer, TransferSettings},
-};
 use optical_core::{
     MAX_FILE_BYTES,
     capacity::block_length,
     protocol::{FrameVerdict, HEADER_LEN, classify_frame, parse_frame, stream_identity},
+    qr::{Ecc, QUIET_ZONE_MODULES, QrFrame},
+    transfer::{FRAME_BYTES_OPTIONS, StartError, TX_FPS_OPTIONS, Transfer, TransferSettings},
 };
 
 fn settings() -> TransferSettings {
@@ -51,9 +49,11 @@ fn successive_frames_share_one_stream_and_advance_by_one() {
         "two frames of one transfer must be one stream to the receiver"
     );
     assert_eq!(first.header.session_id, 0x1234);
+    assert_eq!(first.header.source_blocks, 1);
     assert_eq!(
         usize::from(first.header.block_len),
-        block_length(settings().frame_bytes).unwrap()
+        first.header.total_len as usize,
+        "a payload that fits one block is sent at its own size, not padded"
     );
     assert_eq!(first.block.len(), usize::from(first.header.block_len));
 }
@@ -187,26 +187,42 @@ fn an_oversized_file_is_refused_before_anything_is_compressed() {
 }
 
 #[test]
-fn the_frame_size_leaves_exactly_the_header_behind() {
+fn the_frame_size_is_a_ceiling_and_blocks_are_balanced_under_it() {
+    // Incompressible, so the container is about as long as the text.
+    let mut state = 0x9e37_79b9_u32;
+    let text: String = (0..9000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            char::from(b'!' + (state % 90) as u8)
+        })
+        .collect();
     for frame_bytes in FRAME_BYTES_OPTIONS {
-        let mut transfer = Transfer::from_text(
-            "a payload long enough to need more than one block. ",
-            TransferSettings {
-                frame_bytes,
-                ..TransferSettings::default()
-            },
-            3,
-        )
-        .unwrap();
-        let payload = transfer.next_payload();
-        assert_eq!(
-            payload.len(),
+        let settings = TransferSettings {
             frame_bytes,
-            "a frame must be exactly the size the setting promised"
+            ..TransferSettings::default()
+        };
+        let mut transfer = Transfer::from_text(&text, settings, 3).unwrap();
+        let payload = transfer.next_payload();
+        let frame = parse_frame(&payload).unwrap().unwrap();
+        let total = frame.header.total_len as usize;
+        let ceiling = block_length(frame_bytes).unwrap();
+        let blocks = total.div_ceil(ceiling);
+
+        assert!(
+            payload.len() <= frame_bytes,
+            "a frame may never outgrow its setting"
         );
         assert_eq!(
             payload.len() - HEADER_LEN,
-            block_length(frame_bytes).unwrap()
+            usize::from(frame.header.block_len)
         );
+        assert_eq!(
+            usize::from(frame.header.source_blocks),
+            blocks,
+            "shrinking blocks must not add any"
+        );
+        assert_eq!(usize::from(frame.header.block_len), total.div_ceil(blocks));
     }
 }

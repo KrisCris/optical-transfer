@@ -1,7 +1,7 @@
 {
-  "name": "Optical Transfer Receiver",
+  "name": "Optical Transfer",
   "short_name": "Optical",
-  "description": "Receive files and text from a nearby screen through animated QR codes. No network involved.",
+  "description": "Send and receive photos, files and text through animated QR codes. No network involved in the transfer.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

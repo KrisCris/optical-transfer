@@ -60,6 +60,9 @@ self.onmessage = async (event) => {
   }
 
   const pixels = new Uint8Array(buffer);
+  const decodeStartedAt = performance.now();
+  let trackedAttempted = false;
+  let trackedHit = false;
   const pointer = codec._malloc(width * height * 4);
   try {
     codec.HEAPU8.set(pixels, pointer);
@@ -71,8 +74,8 @@ self.onmessage = async (event) => {
     // the grid sampled directly. It is opportunistic and never load-bearing:
     // any miss falls through to a full read on the same buffer, which also
     // re-anchors the quad.
-    let trackedHit = false;
     if (!full && quad && modules) {
+      trackedAttempted = true;
       const result = codec.readTracked(
         pointer, width, height, modules,
         quad.topLeft.x - offsetX, quad.topLeft.y - offsetY,
@@ -117,9 +120,11 @@ self.onmessage = async (event) => {
       results.delete();
     }
 
-    self.postMessage({ id, symbols, sightings });
+    self.postMessage({ id, symbols, sightings, trackedAttempted, trackedHit,
+      decodeMs: performance.now() - decodeStartedAt });
   } catch {
-    self.postMessage({ id, symbols: [], sightings: [] });
+    self.postMessage({ id, symbols: [], sightings: [], trackedAttempted, trackedHit,
+      decodeMs: performance.now() - decodeStartedAt });
   } finally {
     // Every path frees. An embind vector leak here is a phone that gets slower
     // the longer you point it at something.

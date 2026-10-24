@@ -1,26 +1,77 @@
 # Hardware acceptance
 
-## Status: not yet run
+## Status: rebuilt receiver and senders awaiting their first camera runs
 
-**No transfer in this repository has been carried by an actual camera.** Every
-case below is unrecorded. This file is the form, not the result, and it says so
-because a checklist of unticked boxes that reads like evidence is worse than no
-checklist at all.
+Everything below the next paragraph was measured with the *earlier* receiver
+and single-code senders. Since then:
+
+- the receiver's capture scheduler has been rebuilt (one crop per locked code,
+  every free worker used, camera-frame callbacks);
+- the decoder finishes with Gaussian elimination;
+- both senders show up to nine codes at a time, with staggered flips;
+- the default preset is *Fast*: 2953 bytes, 60 fps, one code.
+
+In the headless loopback benchmark (`scripts/loopback-bench.mjs`) the new
+receiver is 2.2× faster at one code and about 3× faster at four. That says
+nothing about a lens, so cases 9–11 below are the next runs to make, and the
+earlier numbers are the baseline to beat.
+
+## Earlier results: text and first 1 MiB camera transfer verified
+
+On 2026-09-06, a Mac-to-iPhone 14 Plus transfer of `Hello from my Mac`
+succeeded in Safari. The user's receiver screenshot shows `snippet.txt`,
+17 B, 0.8 seconds on the original camera-start timer, and SHA-256 verified,
+with the exact sent text displayed.
+This establishes a real-camera text transfer.
+
+On 2026-09-07, baseline run 1 transferred the incompressible
+`optical-test-1MiB.bin` (1,048,576 bytes) to the same iPhone 14 Plus. The user's
+receiver screenshot reports **62.3 s**, **16.4 KiB/s**, and SHA-256 verified.
+This uses the new first-accepted-capture-to-verification timer. Two further
+runs with the same settings and positioning are pending; no median or frame
+loss rate can be established from this single result.
+
+The user's OG Decimen website comparison on 2026-09-07 received the same named
+1 MiB file in **42.7 s**, displaying **24.0 KB/s** and SHA-256 verified. Its
+summary showed capture FPS 60, decode FPS 36.0, recent goodput 24.7 KB/s,
+847 new / 385 duplicate frames, K=727, and block length 1,443 B. Units and
+labels here are reproduced as displayed. The block size matches our instructed
+setting; sender FPS, positioning, and timing semantics were not independently
+matched, so this is an observed comparison rather than an isolated diagnosis.
+
+On 2026-09-08, the user reported a closer comparison: the same OG-generated QR
+stream, with each receiver aimed before transmission, reached approximately
+30 KB/s in OG and 15 KB/s here. Requested camera profiles differed: ours used
+1920×1080 without a frame-rate constraint; upstream uses 1280×960 with an exact
+60 fps request and an ideal-rate fallback. The receiver now matches that
+profile. Whether it closes the hardware throughput gap remains unverified;
+compare the actual Camera field and final file-throughput result on the next run.
+
+The instructed settings were 1465 bytes/frame, 24 fps, ECC L, and one code;
+the screenshot does not independently confirm sender settings. iOS version,
+display refresh rate, distance, and an independently compared saved-file hash
+were not recorded.
 
 What *has* been verified, and what it does and does not cover:
 
 | Evidence | Covers | Does not cover |
 | --- | --- | --- |
-| `cargo test --workspace` (50 tests) | The wire format against upstream's own golden vectors; sender to receiver in bytes | Anything optical |
+| `cargo test --workspace` | Wire compatibility, shared sender/receiver, and file bundle checks | Anything optical |
+| `node --test web/app/tests/*.test.mjs` | Capture scheduling (scan cadence, crops, region lifetime, worker pool), telemetry arithmetic, the flip clock and grid choice, formatting | Camera hardware or decode speed |
+| `scripts/loopback-bench.mjs` | The real capture and decode pipeline, driven by the real sender display re-filmed at 1280×960 with blur, tilt and contrast loss | A lens, exposure, glare, rolling shutter, or a phone's CPU |
 | `scripts/upstream-conformance/` | Bidirectional interop with the pinned upstream v0.5.3, gzip included | Anything optical |
-| `web/receiver/tests/optical-loop.html` | Sender-drawn QR modules → the shipped zxing-cpp build → the Rust receiver, over a lossy stream | A lens, exposure, focus, glare, motion blur, rolling shutter, screen refresh, or ambient light |
-| `web/receiver/tests/decoder.html` | The compiled WASM receiver in a real browser | The camera path |
+| `web/app/tests/optical-loop.html` | Sender-drawn QR modules → the shipped zxing-cpp build → the Rust receiver, over a lossy stream | A lens, exposure, focus, glare, motion blur, rolling shutter, screen refresh, or ambient light |
+| `web/app/tests/decoder.html` | The compiled WASM receiver in a real browser | The camera path |
+| User-supplied iPhone 14 Plus screenshot, 2026-09-06 | Real-camera receipt of the exact 17-byte text, with receiver SHA-256 verification | Sustained throughput, large files, Unicode, or offline installation |
+| User-supplied iPhone 14 Plus screenshot, 2026-09-07, baseline run 1 | 1 MiB binary received and SHA-256 verified in 62.3 s at 16.4 KiB/s | Repeatability, sender settings visible in evidence, decode/drop statistics, or an independent saved-file hash comparison |
+| Browser web-sender UI run | Mixed photo/text/binary selection → Rust/WASM QR canvas → zxing → Rust receiver → ZIP; all three extracted files byte-identical in Python | Physical phone photo picker, a lens, or sustained hardware throughput |
+| Browser folder-picker run | Selected `Trip` folder → worker/WASM → displayed QR → ZIP; `day-1/notes.txt` and `day-2/notes.txt` retain paths and exact bytes after extraction | Physical iPhone folder picker or empty directories |
 
 The optical-loop test is the closest thing to proof available without hardware:
 it reads the sender's real pixels with the receiver's real decoder. What it
 cannot tell you is whether a phone held at arm's length in a lit room can
-resolve those modules at all — which is precisely what the defaults are tuned
-for and precisely what nobody has measured yet.
+resolve those modules reliably across conditions. The text smoke test above
+establishes one successful real-camera run; broader hardware validation remains.
 
 ## How to run a case
 
@@ -33,12 +84,12 @@ for and precisely what nobody has measured yet.
    mkdir -p .tooling
    openssl req -x509 -newkey rsa:2048 -nodes -days 7 \
      -keyout .tooling/dev-key.pem -out .tooling/dev-cert.pem -subj "/CN=localhost"
-   python3 scripts/serve-web.py --directory web/receiver --port 8443 \
+   python3 scripts/serve-web.py --directory web/app --port 8443 \
      --cert .tooling/dev-cert.pem --key .tooling/dev-key.pem
    ```
 
-3. `cargo run -p desktop-sender --release`, choose the payload, press
-   **Start sending**, and use **Fullscreen**.
+3. `cargo run -p desktop-sender --release`, choose the payload, pick a
+   preset, press **Start sending**, and use **Full screen** (or F).
 4. Open the served URL on the phone, accept the self-signed certificate, and
    press **Start camera**.
 5. Compare the recovered file against the sender's own hash:
@@ -53,21 +104,24 @@ the frame size and the distance is not information anyone can act on.
 | # | Sender | Receiver | Payload | Settings | Result |
 | --- | --- | --- | --- | --- | --- |
 | 1 | macOS arm64 | iPhone Safari | Unicode text | defaults | not run |
-| 2 | macOS arm64 | iPhone Safari | 1 MiB binary | defaults | not run |
+| 2 | macOS arm64 | iPhone 14 Plus Safari | 1 MiB binary | defaults instructed; not visible in screenshot | run 1: received, SHA-256 verified, 62.3 s, 16.4 KiB/s; repeat runs and independent saved-file hash comparison pending |
 | 3 | macOS arm64 | Android Chrome | Unicode **filename**, 1 MiB binary | defaults | not run |
 | 4 | Windows or Linux x86-64 | either phone | 1 MiB binary | defaults | not run |
 | 5 | any | any | any | receiver started only *after* the sender has played a full carousel | not run |
 | 6 | any | any | 1 MiB binary | deliberately fail at 2953 bytes / 60 fps, then fall back to the suggested lower setting | not run |
 | 7 | any | any | any | receiver installed to the home screen, device in airplane mode, app reopened | not run |
+| 8 | iPhone Safari web sender | another device's browser | multiple photos plus a file | defaults; save ZIP and compare extracted contents | not run |
+| 9 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary as case 2 | Fast (2953 B, 60 fps, 1 code) | not run |
+| 10 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Balanced and Max (2 and 4 codes) | not run |
+| 11 | any sender on a second screen | Mac web receiver using an iPhone as Continuity Camera | 1 MiB binary | Fast, then Max | not run |
 
 Case 5 has a software analogue that passes
 (`a_receiver_joining_mid_carousel_still_completes`); the hardware version also
 exercises reacquisition, which the software one does not.
 
-Case 7 is the only check of the service worker. It is currently unverified in
-any form — service workers are disabled in the browser available during
-development, confirmed by a one-line service worker failing to register
-identically to the real one.
+Case 7 remains unverified on phone hardware. Desktop browser automation has
+verified an offline reload and a subsequent web-sender text transfer; that
+does not establish iPhone home-screen installation or airplane-mode behavior.
 
 ## Recording template
 
@@ -76,9 +130,11 @@ date:      2026-__-__
 sender:    <os, arch, display refresh rate>
 receiver:  <phone model, os version, browser>
 payload:   <name, size>
-settings:  <bytes/frame, fps, ecc, codes>
+settings:  <preset, or bytes/frame, fps, ecc, codes>
 distance:  <roughly, cm>
-elapsed:   <seconds from start of camera to result>
+elapsed:   <Transfer time shown: first accepted QR capture to verified result>
+speed:     <Average speed shown, KiB/s; recovered file bytes / elapsed time>
 sha256:    <sender>  /  <receiver>   → match / MISMATCH
+telemetry: <catch rate, overhead, capture fps, decode/s, dropped %, camera>
 notes:     <anything surprising>
 ```

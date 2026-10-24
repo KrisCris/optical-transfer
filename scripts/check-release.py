@@ -8,8 +8,9 @@ failure it exists to prevent:
   an AGPL-3.0-or-later work, so a binary without LICENSE, NOTICE.md and a
   pointer to corresponding source is not a release -- it is a licence
   violation. Making that a build failure is cheaper than remembering.
-* A receiver bundle missing one of its two WebAssembly modules. It would load,
-  reach the camera screen, and decode nothing, which is the hardest kind of
+* A web bundle missing one of its two WebAssembly modules, or a module its
+  service worker precaches. It would load, reach the camera screen, and decode
+  nothing -- or work online and fail offline -- which is the hardest kind of
   failure to attribute.
 
 Standard library only.
@@ -19,29 +20,27 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from pathlib import Path
 
-# Files that must exist in every release, whatever the platform.
+# Files that must exist in every release, whatever the platform. The web
+# bundle's modules are not listed here: whatever its service worker precaches
+# must be present, which keeps this list from going stale on every rename.
 REQUIRED_FILES = (
     "LICENSE",
     "NOTICE.md",
     "SOURCE.txt",
     "SHA256SUMS",
     "README.md",
-    "receiver/index.html",
-    "receiver/app.js",
-    "receiver/worker.js",
-    "receiver/styles.css",
-    "receiver/service-worker.js",
-    "receiver/manifest.webmanifest",
-    "receiver/icons/icon.svg",
-    "receiver/pkg/optical_wasm.js",
-    "receiver/pkg/optical_wasm_bg.wasm",
-    "receiver/vendor/decimen-codec/decimen_codec.js",
-    "receiver/vendor/decimen-codec/decimen_codec.wasm",
-    "receiver/vendor/decimen-codec/LICENSE.zxing-cpp",
-    "receiver/vendor/decimen-codec/NOTICE.md",
+    "web/index.html",
+    "web/service-worker.js",
+    "web/pkg/optical_wasm.js",
+    "web/pkg/optical_wasm_bg.wasm",
+    "web/vendor/decimen-codec/decimen_codec.js",
+    "web/vendor/decimen-codec/decimen_codec.wasm",
+    "web/vendor/decimen-codec/LICENSE.zxing-cpp",
+    "web/vendor/decimen-codec/NOTICE.md",
 )
 
 # The sender, named per platform. Exactly one must be present.
@@ -60,12 +59,25 @@ def digest(path: Path) -> str:
     return sha.hexdigest()
 
 
+def precached(root: Path) -> list[str]:
+    worker = root / "web" / "service-worker.js"
+    if not worker.is_file():
+        return []
+    match = re.search(r"const ASSETS\s*=\s*\[(.*?)\];", worker.read_text(), re.S)
+    if not match:
+        return []
+    assets = re.findall(r"[\"']([^\"']+)[\"']", match.group(1))
+    return [f"web/{asset.removeprefix('./')}" for asset in assets if asset not in ("./", "/")]
+
+
 def check(root: Path) -> list[str]:
     failures: list[str] = []
 
-    for name in REQUIRED_FILES:
+    for name in (*REQUIRED_FILES, *precached(root)):
         if not (root / name).is_file():
             failures.append(f"missing {name}")
+    if (root / "web" / "tests").exists():
+        failures.append("web/tests is a development harness and must not ship")
 
     senders = [name for name in SENDER_CANDIDATES if (root / name).is_file()]
     if not senders:

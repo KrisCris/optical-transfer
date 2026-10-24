@@ -49,6 +49,17 @@
   const hexToBytes = (hex) =>
     Uint8Array.from(hex.match(/../g) ?? [], (pair) => parseInt(pair, 16));
 
+  // addFrame returns a small outcome code; flags ride in the high bits.
+  const KIND = ["ignored", "progress", "complete", "incompatible", "failed"];
+  const feed = (receiver, bytes) => {
+    const outcome = receiver.addFrame(bytes);
+    return {
+      kind: KIND[outcome & 0x0f],
+      useful: (outcome & 0x40) !== 0,
+      newStream: (outcome & 0x80) !== 0,
+    };
+  };
+
   try {
     await init();
     const fixture = await fetch("./frames.json").then((response) => response.json());
@@ -58,62 +69,73 @@
     // these constantly — shop windows, posters — and must stay silent.
     check(
       "an unrelated QR payload is ignored",
-      receiver.addFrame(new TextEncoder().encode("https://example.invalid/")).kind === "ignored",
+      feed(receiver, new TextEncoder().encode("https://example.invalid/")).kind === "ignored",
     );
 
     // Ours, but a wire version this build does not speak. This is the one case
     // that must NOT be silent: it is why the version byte exists.
-    const newer = receiver.addFrame(new Uint8Array([0xd1, 0xc3, 9, 0]));
+    const newer = feed(receiver, new Uint8Array([0xd1, 0xc3, 9, 0]));
     check(
       "a newer wire version is named rather than ignored",
-      newer.kind === "incompatible" && newer.message.includes("9"),
-      newer,
+      newer.kind === "incompatible" && receiver.message().includes("9"),
+      { ...newer, message: receiver.message() },
     );
 
     let complete = null;
     let progressSeen = 0;
+    const first = hexToBytes(fixture.frames[0]);
+    const firstEvent = feed(receiver, first);
+    check("the first frame starts a stream and is useful", firstEvent.newStream && firstEvent.useful, firstEvent);
+    const stats = receiver.stats();
+    check("stats are plain JavaScript properties", firstEvent.kind === "progress" &&
+      stats.uniqueFrames === 1 && stats.blockLen > 0 && stats.totalBytes > 0, stats);
+    check("the solved map has one entry per source block", receiver.solvedMap().length === stats.totalBlocks);
+    const repeated = feed(receiver, first);
+    check("a duplicate neither restarts the stream nor counts as useful",
+      !repeated.newStream && !repeated.useful, repeated);
+    const after = receiver.stats();
+    check("a duplicate updates only the duplicate count", after.duplicateFrames === 1 && after.uniqueFrames === 1, after);
+    receiver.reset();
     for (const hex of fixture.frames) {
-      const event = receiver.addFrame(hexToBytes(hex));
+      const event = feed(receiver, hexToBytes(hex));
       if (event.kind === "progress") {
         progressSeen++;
         continue;
       }
       if (event.kind === "complete") {
-        complete = event;
+        complete = { stats: receiver.stats(), result: receiver.takeResult() };
         break;
       }
-      check(`unexpected event while streaming: ${event.kind}`, false, event);
+      check(`unexpected event while streaming: ${event.kind}`, false, receiver.message());
       break;
     }
 
     check("the lossy stream reported progress before completing", progressSeen > 0);
-    check("the lossy stream completed", complete !== null, complete);
+    check("the lossy stream completed", complete !== null);
 
     if (complete) {
-      check("the recovered name matches", complete.name === fixture.name, complete.name);
-      check(
-        "the recovered media type matches",
-        complete.mediaType === fixture.mediaType,
-        complete.mediaType,
-      );
-      check("the payload is flagged as text", complete.isText === true, complete);
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(
-        new Uint8Array(complete.bytes),
-      );
+      const { stats: final, result } = complete;
+      check("completion retains final block statistics", final.solvedBlocks === final.totalBlocks &&
+        final.uniqueFrames > 1 && final.blockLen > 0, final);
+      check("the recovered name matches", result.name === fixture.name, result.name);
+      check("the recovered media type matches", result.mediaType === fixture.mediaType, result.mediaType);
+      check("the payload is flagged as text", result.isText === true);
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(result.bytes);
       check("the recovered text is byte-identical", text === fixture.text, text);
+      check("the result is handed over once", receiver.takeResult() === undefined);
+      result.free();
     }
 
     // Completion clears the stream, so the same fixture decodes again from a
     // receiver that was never explicitly reset.
-    let second = null;
+    let second = false;
     for (const hex of fixture.frames) {
-      const event = receiver.addFrame(hexToBytes(hex));
-      if (event.kind === "complete") {
-        second = event;
+      if (feed(receiver, hexToBytes(hex)).kind === "complete") {
+        second = true;
         break;
       }
     }
-    check("a second transfer runs on the same receiver", second !== null);
+    check("a second transfer runs on the same receiver", second);
   } catch (error) {
     check(`the test harness itself threw: ${error}`, false, String(error?.stack ?? error));
   }

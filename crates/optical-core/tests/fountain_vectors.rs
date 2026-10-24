@@ -207,6 +207,41 @@ fn framed_transfer_recovers_after_deterministic_fifteen_percent_loss() {
     assert!(decoder.unique_frames() as f64 / f64::from(encoder.source_blocks()) < 1.3);
 }
 
+#[test]
+fn elimination_finishes_heavy_loss_inside_the_first_repair_half() {
+    // Peeling alone needs ~1.4 unique frames per block at 60% loss, because
+    // most repair frames still cover several unknowns when they arrive and
+    // the decoder waits for the next systematic sweep. Elimination solves
+    // them together as soon as there are enough.
+    for (session_id, loss) in [(5_u16, 0.4), (6, 0.6), (7, 0.75)] {
+        let (payload, unique, _, overhead) = round_trip(512 * 1024, 2930, session_id, loss);
+        assert_eq!(payload, test_payload(512 * 1024));
+        assert!(
+            overhead < 1.2,
+            "loss {loss}: {unique} unique frames is {overhead:.3} per block"
+        );
+    }
+}
+
+#[test]
+fn elimination_and_peeling_agree_on_every_block() {
+    let payload = test_payload(64 * 1024);
+    let encoder = LtEncoder::new(&payload, 512, 3).unwrap();
+    let mut decoder = LtDecoder::new(encoder.source_blocks(), 512, 3, payload.len()).unwrap();
+    // Systematic frames for every other block, then repair only: the second
+    // half can only be recovered by elimination or a much later sweep.
+    let k = u32::from(encoder.source_blocks());
+    for seq in (0..k).step_by(2).chain(k..2 * k) {
+        if decoder.is_complete() {
+            break;
+        }
+        decoder.add_frame(seq, &encoder.encode(seq)).unwrap();
+    }
+    assert!(decoder.is_complete());
+    assert!(decoder.eliminations() >= 1);
+    assert_eq!(decoder.assemble().unwrap(), payload);
+}
+
 fn round_trip(
     size: usize,
     block_len: usize,

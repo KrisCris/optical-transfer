@@ -14,7 +14,7 @@
 use optical_core::{
     OpticalError,
     container::{unpack_file, verify_file},
-    fountain::LtDecoder,
+    fountain::{AddFrame, LtDecoder},
     protocol::{
         FrameHeader, FrameVerdict, StreamIdentity, classify_frame, fnv1a, parse_frame,
         stream_identity,
@@ -53,6 +53,28 @@ pub fn frame_budget(source_blocks: u16) -> usize {
 /// type a sender meant to send.
 const MAX_MEDIA_TYPE_LEN: usize = 255;
 
+/// Decoder counters and container dimensions for the current stream.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverStats {
+    pub unique_frames: usize,
+    pub duplicate_frames: usize,
+    pub redundant_frames: usize,
+    pub solved_blocks: usize,
+    pub total_blocks: usize,
+    pub block_len: usize,
+    /// Packed container length, before decompression and file extraction.
+    pub total_bytes: usize,
+    /// Sequence numbers between the lowest and highest frame seen, inclusive:
+    /// roughly what the sender emitted while this receiver watched. Unique
+    /// frames over this span is the fraction of the stream actually caught.
+    pub seq_span: u32,
+    /// Repair equations parked until peeling or elimination can use them.
+    pub pending_equations: usize,
+    /// Gaussian-elimination passes the decoder has attempted.
+    pub eliminations: usize,
+}
+
 /// What one decoded QR payload did to the transfer.
 ///
 /// `kind` is the tag on the wire to JavaScript, so the variants are the whole
@@ -70,13 +92,17 @@ pub enum ReceiverEvent {
     Incompatible { message: String },
     #[serde(rename_all = "camelCase")]
     Progress {
-        unique_frames: usize,
-        solved_blocks: usize,
-        total_blocks: usize,
+        /// This frame started a new stream, including an identity replacement.
+        new_stream: bool,
+        #[serde(flatten)]
+        stats: ReceiverStats,
     },
     /// Verified. Both checks passed; these bytes are what the sender sent.
     #[serde(rename_all = "camelCase")]
     Complete {
+        /// A one-frame transfer started and completed in this event.
+        new_stream: bool,
+        stats: ReceiverStats,
         name: String,
         media_type: String,
         bytes: Vec<u8>,
@@ -91,6 +117,8 @@ pub struct ReceiverState {
     stream: Option<StreamIdentity>,
     decoder: Option<LtDecoder>,
     budget: usize,
+    duplicate_frames: usize,
+    seq_range: Option<(u32, u32)>,
 }
 
 impl Default for ReceiverState {
@@ -105,6 +133,8 @@ impl ReceiverState {
             stream: None,
             decoder: None,
             budget: 0,
+            duplicate_frames: 0,
+            seq_range: None,
         }
     }
 
@@ -113,6 +143,18 @@ impl ReceiverState {
         self.stream = None;
         self.decoder = None;
         self.budget = 0;
+        self.duplicate_frames = 0;
+        self.seq_range = None;
+    }
+
+    /// One byte per source block of the current stream, 1 where the block is
+    /// recovered. Empty when no stream is locked.
+    pub fn solved_map(&self) -> Vec<u8> {
+        self.decoder.as_ref().map_or_else(Vec::new, |decoder| {
+            (0..decoder.source_blocks())
+                .map(|index| u8::from(decoder.is_solved(usize::from(index))))
+                .collect()
+        })
     }
 
     /// Feed one decoded QR payload in.
@@ -167,10 +209,13 @@ impl ReceiverState {
         // decoder corrupts it silently — surfacing only as a checksum failure
         // after the whole transfer has run.
         let identity = stream_identity(header);
-        if self.stream != Some(identity) {
+        let new_stream = self.stream != Some(identity);
+        if new_stream {
             match Self::start(header) {
                 Ok(decoder) => {
                     self.budget = frame_budget(header.source_blocks);
+                    self.duplicate_frames = 0;
+                    self.seq_range = None;
                     self.decoder = Some(decoder);
                     self.stream = Some(identity);
                 }
@@ -185,11 +230,34 @@ impl ReceiverState {
             .decoder
             .as_mut()
             .expect("a locked stream always has a decoder");
-        if decoder.add_frame(header.seq, parsed.block).is_err() {
-            // Unreachable while stream identity pins `block_len`, but a decoder
-            // that cannot take the frame must not be asked about it either.
-            return ReceiverEvent::Ignored;
+        match decoder.add_frame(header.seq, parsed.block) {
+            Ok(AddFrame::Duplicate) => self.duplicate_frames += 1,
+            Ok(_) => {}
+            Err(_) => {
+                // Unreachable while stream identity pins `block_len`, but a decoder
+                // that cannot take the frame must not be asked about it either.
+                return ReceiverEvent::Ignored;
+            }
         }
+
+        let (low, high) = self
+            .seq_range
+            .map_or((header.seq, header.seq), |(low, high)| {
+                (low.min(header.seq), high.max(header.seq))
+            });
+        self.seq_range = Some((low, high));
+        let stats = ReceiverStats {
+            unique_frames: decoder.unique_frames(),
+            duplicate_frames: self.duplicate_frames,
+            redundant_frames: decoder.redundant_frames(),
+            solved_blocks: decoder.solved_count(),
+            total_blocks: usize::from(header.source_blocks),
+            block_len: usize::from(header.block_len),
+            total_bytes: header.total_len as usize,
+            seq_span: high - low + 1,
+            pending_equations: decoder.pending_equations(),
+            eliminations: decoder.eliminations(),
+        };
 
         if decoder.is_complete() {
             let container = match decoder.assemble() {
@@ -204,7 +272,7 @@ impl ReceiverState {
                 }
             };
             self.reset();
-            return finish(&container, header);
+            return finish(&container, header, new_stream, stats);
         }
 
         if decoder.unique_frames() >= self.budget {
@@ -218,11 +286,7 @@ impl ReceiverState {
             };
         }
 
-        ReceiverEvent::Progress {
-            unique_frames: decoder.unique_frames(),
-            solved_blocks: decoder.solved_count(),
-            total_blocks: usize::from(header.source_blocks),
-        }
+        ReceiverEvent::Progress { new_stream, stats }
     }
 
     /// Build a decoder for a header, or say why these dimensions are refused.
@@ -250,7 +314,12 @@ impl ReceiverState {
 /// stream assembled from frames that did not belong together; the container
 /// SHA-256 catches a container whose own bytes are wrong. Neither is skipped
 /// because the other passed.
-fn finish(container: &[u8], header: FrameHeader) -> ReceiverEvent {
+fn finish(
+    container: &[u8],
+    header: FrameHeader,
+    new_stream: bool,
+    stats: ReceiverStats,
+) -> ReceiverEvent {
     if fnv1a(container) != header.payload_fnv {
         return ReceiverEvent::Failed {
             message: "The recovered stream did not match its checksum. Nothing was saved."
@@ -276,6 +345,8 @@ fn finish(container: &[u8], header: FrameHeader) -> ReceiverEvent {
         // is not text is a failure rather than a screenful of U+FFFD.
         return match snippet_text(&file) {
             Ok(text) => ReceiverEvent::Complete {
+                new_stream,
+                stats,
                 name: file.name.clone(),
                 media_type: safe_media_type(&file.media_type),
                 bytes: text.as_bytes().to_vec(),
@@ -288,6 +359,8 @@ fn finish(container: &[u8], header: FrameHeader) -> ReceiverEvent {
     }
 
     ReceiverEvent::Complete {
+        new_stream,
+        stats,
         name: file.name.clone(),
         media_type: safe_media_type(&file.media_type),
         bytes: file.bytes,

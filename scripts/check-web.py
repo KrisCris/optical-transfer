@@ -12,6 +12,9 @@ late to matter:
    font or an analytics script would make that claim false in the one place a
    user cannot check it.
 3. The structural pieces the app script binds to are actually in the HTML.
+4. Every module parses. One syntax error in an imported module takes the
+   whole page down with it, including the half the user did not touch. Needs
+   Node; skipped with a note when it is not installed.
 
 Standard library only, and deliberately blunt: it reads files as text and looks
 for patterns rather than parsing HTML, because a parser dependency here would
@@ -21,21 +24,36 @@ itself be something to keep pinned.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RECEIVER = ROOT / "web" / "receiver"
+RECEIVER = ROOT / "web" / "app"
 SERVICE_WORKER = RECEIVER / "service-worker.js"
 
-# Element ids app.js binds to. Listed here so a rename in one place fails the
-# build instead of producing a receiver with a dead button.
+# Element ids the modules bind to. Listed here so a rename in one place fails
+# the build instead of producing a page with a dead button.
 REQUIRED_IDS = (
-    "video", "overlay", "viewfinder", "start", "stop", "status", "error",
-    "progress", "bar", "percent", "progress-label", "blocks-grid",
-    "m-frames", "m-blocks", "m-decodes",
-    "result", "result-name", "result-stats", "result-text",
-    "result-save", "result-copy", "dismiss",
+    "mode-receive", "mode-send", "panel-receive", "panel-send",
+    "rx-viewfinder", "rx-video", "rx-overlay", "rx-hud-state", "rx-hud-rate", "rx-hud-bar",
+    "rx-start", "rx-stop", "rx-settings", "rx-camera", "rx-width", "rx-workers",
+    "rx-status", "rx-error", "rx-hint", "rx-phase", "rx-percent", "rx-speed", "rx-eta",
+    "rx-elapsed", "rx-progress", "rx-bar", "rx-chart", "rx-chart-scale", "rx-map", "rx-map-label",
+    "rx-result", "rx-result-name", "rx-result-meta", "rx-result-image", "rx-result-text",
+    "rx-save", "rx-share", "rx-copy", "rx-again",
+    "t-size", "t-k", "t-blocklen", "t-frames", "t-redundant", "t-pending", "t-elim",
+    "t-catch", "t-overhead", "t-avgpeak", "t-capture", "t-decode", "t-symbols", "t-codes",
+    "t-mode", "t-workers", "t-tracked", "t-latency", "t-dropped", "t-camera", "t-decoder",
+    "tx-files-panel", "tx-text-panel", "tx-drop", "tx-files", "tx-folder", "tx-folder-button",
+    "tx-summary", "tx-clear", "tx-list", "tx-text", "tx-text-count",
+    "tx-bytes", "tx-fps", "tx-codes", "tx-ecc", "tx-preset-rate",
+    "tx-start", "tx-stop", "tx-status", "tx-error",
+    "tx-stage", "tx-canvas", "tx-fullscreen", "tx-exit",
+    "s-session", "s-cycle-bar", "s-cycle", "s-payload", "s-compression", "s-code", "s-k",
+    "s-rate", "s-ideal", "s-frames", "s-flips", "s-display",
 )
 
 TEXT_SUFFIXES = {".html", ".css", ".js", ".webmanifest", ".json", ".svg"}
@@ -94,6 +112,11 @@ def check_local_references(failures: list[str], assets: list[str]) -> None:
             failures.append(f"index.html references {reference}, which does not exist")
         elif target not in precached:
             failures.append(f"index.html references {reference}, which the service worker does not precache")
+    # Modules and workers are imported from script, not markup: every one of
+    # them has to be precached too, or the app loads offline and then fails.
+    for module in sorted(RECEIVER.glob("*.js")):
+        if module.name != "service-worker.js" and module.name not in precached:
+            failures.append(f"{module.name} is not precached by the service worker")
 
 
 def check_no_runtime_network(failures: list[str]) -> None:
@@ -111,6 +134,25 @@ def check_no_runtime_network(failures: list[str]) -> None:
                 )
 
 
+def check_modules_parse(failures: list[str]) -> bool:
+    node = shutil.which("node")
+    if not node:
+        return False
+    modules = sorted(RECEIVER.glob("*.js")) + sorted((RECEIVER / "tests").glob("*.mjs"))
+    with tempfile.TemporaryDirectory() as scratch:
+        for module in modules:
+            # Copied to .mjs so Node parses it as the browser will: as a module.
+            copy = Path(scratch) / f"{module.stem}.mjs"
+            shutil.copyfile(module, copy)
+            result = subprocess.run([node, "--check", str(copy)], capture_output=True, text=True)
+            if result.returncode != 0:
+                # The temp path may be reported through a symlink (/private/var).
+                detail = re.sub(r"\S*" + re.escape(copy.name), str(module.relative_to(ROOT)),
+                                result.stderr.strip())
+                failures.append(f"{module.relative_to(ROOT)} does not parse:\n{detail}")
+    return True
+
+
 def check_structure(failures: list[str]) -> None:
     html = (RECEIVER / "index.html").read_text()
     for element_id in REQUIRED_IDS:
@@ -120,6 +162,12 @@ def check_structure(failures: list[str]) -> None:
         failures.append("the video element needs playsinline or iOS opens it fullscreen")
     if 'role="alert"' not in html or 'role="status"' not in html:
         failures.append("status and error regions must be announced to a screen reader")
+    for element_id in ("tx-files", "tx-folder"):
+        tag = re.search(rf'<input\b[^>]*id="{element_id}"[^>]*>', html)
+        if not tag or not re.search(r'\bmultiple\b', tag.group()):
+            failures.append(f"{element_id} must allow multiple files")
+        if element_id == "tx-folder" and (not tag or "webkitdirectory" not in tag.group()):
+            failures.append("tx-folder must use the directory picker")
     if "not encrypted" not in html.lower():
         failures.append("the security warning is missing from index.html")
     # Inline SVG icons are fine; an inline <style> or <script> is not, because
@@ -139,6 +187,7 @@ def main() -> int:
     check_local_references(failures, assets)
     check_no_runtime_network(failures)
     check_structure(failures)
+    parsed = check_modules_parse(failures)
 
     if failures:
         print("receiver contract violations:", file=sys.stderr)
@@ -146,7 +195,8 @@ def main() -> int:
             print(f"  {failure}", file=sys.stderr)
         return 1
 
-    print(f"web: {len(assets)} precached assets, no runtime network, structure intact")
+    print(f"web: {len(assets)} precached assets, no runtime network, structure intact"
+          + (", modules parse" if parsed else " (node not found: module parse check skipped)"))
     return 0
 
 

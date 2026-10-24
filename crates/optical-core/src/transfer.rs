@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use optical_core::{
+use crate::{
     MAX_FILE_BYTES, OpticalError,
     capacity::{
         block_length, fits_in_one_stream, smallest_sufficient_frame_size, source_block_count,
@@ -237,6 +237,13 @@ impl Transfer {
                 ecc: settings.ecc,
             })?;
 
+        // The frame size is a ceiling, not a quota. Keep the block count the
+        // ceiling implies and spread the payload evenly across it, so a short
+        // text rides a small, coarse code instead of a padded version 40.
+        // Receivers take the block length from the header.
+        let blocks = payload.len().div_ceil(block_len).max(1);
+        let block_len = payload.len().div_ceil(blocks).max(1);
+
         let encoder =
             LtEncoder::new(payload, block_len, session_id).map_err(StartError::Packing)?;
         let header = FrameHeader {
@@ -289,6 +296,10 @@ impl Transfer {
         self.encoder.source_blocks()
     }
 
+    pub fn block_len(&self) -> usize {
+        usize::from(self.header.block_len)
+    }
+
     pub fn session_id(&self) -> u16 {
         self.header.session_id
     }
@@ -323,15 +334,16 @@ impl Transfer {
     }
 }
 
-/// A size a person can read, in the units the rest of the UI uses.
+/// A size a person can read, in the binary units both senders and the
+/// receiver use (1 KiB = 1024 B).
 pub fn human_bytes(bytes: usize) -> String {
     const KIB: f64 = 1024.0;
     let bytes = bytes as f64;
     if bytes < KIB {
         format!("{bytes:.0} B")
     } else if bytes < KIB * KIB {
-        format!("{:.1} KB", bytes / KIB)
+        format!("{:.1} KiB", bytes / KIB)
     } else {
-        format!("{:.1} MB", bytes / KIB / KIB)
+        format!("{:.2} MiB", bytes / KIB / KIB)
     }
 }

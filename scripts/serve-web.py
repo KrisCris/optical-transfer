@@ -13,7 +13,7 @@ dev server that caches is a dev server that shows you yesterday's build.
 
 Standard library only.
 
-    python3 scripts/serve-web.py --directory web/receiver --port 8443 \
+    python3 scripts/serve-web.py --directory web/app --port 8443 \
       --cert .tooling/dev-cert.pem --key .tooling/dev-key.pem
 """
 
@@ -67,7 +67,7 @@ def local_addresses(port: int, scheme: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--directory", default="web/receiver")
+    parser.add_argument("--directory", default="web/app")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--cert", type=Path)
     parser.add_argument("--key", type=Path)

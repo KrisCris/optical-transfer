@@ -33,10 +33,13 @@
 <p id="summary">Running…</p>
 
 <script type="module">
-  import init, { WasmReceiver } from "../pkg/optical_wasm.js";
+  import init, { WasmReceiver, WasmSender } from "../pkg/optical_wasm.js";
   import DecimenCodec from "../vendor/decimen-codec/decimen_codec.js";
 
   const results = document.getElementById("results");
+  // addFrame outcome codes (low nibble).
+  const PROGRESS = 1;
+  const COMPLETE = 2;
   let failures = 0;
 
   function check(name, condition, detail) {
@@ -149,16 +152,16 @@
       decoded++;
       reportedModules ??= symbols[0].modules;
 
-      const event = receiver.addFrame(symbols[0].bytes);
-      if (event.kind === "progress") {
+      const kind = receiver.addFrame(symbols[0].bytes) & 0x0f;
+      if (kind === PROGRESS) {
         sawProgress = true;
         continue;
       }
-      if (event.kind === "complete") {
-        complete = event;
+      if (kind === COMPLETE) {
+        complete = receiver.takeResult();
         break;
       }
-      check(`unexpected receiver event: ${event.kind}`, false, event);
+      check(`unexpected receiver outcome: ${kind}`, false, receiver.message());
       break;
     }
 
@@ -179,12 +182,46 @@
         complete.mediaType,
       );
       check("the payload is flagged as text", complete.isText === true);
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(complete.bytes));
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(complete.bytes);
       check(
         "the recovered text is byte-identical to what the sender packed",
         text === fixture.text,
         `${text.length} chars vs ${fixture.text.length}`,
       );
+    }
+    receiver.free();
+
+    // Exercise the browser's Rust sender as well as the native sender fixture.
+    const binary = Uint8Array.from({ length: 2400 }, (_, i) => (i * 37 + Math.floor(i / 251)) % 256);
+    const snippet = new TextEncoder().encode("Web sender — 你好 👋");
+    for (const mode of ["file", "text", "bundle"]) {
+      const sender = new WasmSender();
+      const target = new WasmReceiver();
+      try {
+        if (mode !== "text") sender.addFile("photo.bin", "application/octet-stream", binary);
+        if (mode === "bundle") sender.addFile("notes.txt", "text/plain", snippet);
+        const info = mode === "text"
+          ? sender.prepareText(new TextDecoder().decode(snippet), 500, 24, "L", 42)
+          : sender.prepareFiles(500, 24, "L", 42);
+        let result = null;
+        for (let seq = 0; seq < 100 && !result; seq++) {
+          const pixels = sender.nextFrames(1);
+          if (seq % 4 === 3) continue;
+          for (const symbol of readFull(codec, paint(stage, pixels, info.qrSize, 3))) {
+            if ((target.addFrame(symbol.bytes) & 0x0f) === COMPLETE) { result = target.takeResult(); break; }
+          }
+        }
+        check(`WASM ${mode} sender survives QR decoding and frame loss`, result !== null);
+        if (result && mode !== "bundle") {
+          const expected = mode === "file" ? binary : snippet;
+          const bytes = result.bytes; // a getter that copies out of wasm memory
+          check(`WASM ${mode} payload is byte-identical`, bytes.length === expected.length &&
+            expected.every((byte, index) => byte === bytes[index]));
+        } else if (result) {
+          check("WASM multi-file transfer is a verified ZIP", result.name === "transfer.zip" &&
+            result.mediaType === "application/zip" && result.bytes.subarray(0, 2).join() === "80,75");
+        }
+      } finally { sender.free(); target.free(); }
     }
   } catch (error) {
     check(`the harness itself threw: ${error}`, false, String(error?.stack ?? error));

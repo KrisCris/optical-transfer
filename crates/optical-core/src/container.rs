@@ -195,7 +195,7 @@ fn gunzip_bounded(bytes: &[u8], limit: usize) -> Result<Vec<u8>, OpticalError> {
     Ok(output)
 }
 
-fn safe_file_name(name: &str) -> String {
+pub(crate) fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let cleaned: String = base
         .chars()

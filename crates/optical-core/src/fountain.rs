@@ -239,6 +239,15 @@ struct Equation {
     words: Vec<u32>,
 }
 
+/// Largest unsolved-block count the decoder will hand to Gaussian elimination.
+///
+/// Elimination is dense: the symbolic pass is `O(u³/64)` and the payload pass
+/// `O(u² · block words)`. At 1024 unknowns that is a few tens of milliseconds
+/// in a phone's WebAssembly — paid once, at the moment the transfer finishes.
+/// Above it the decoder keeps peeling until the next sweep brings the unknown
+/// count under the limit.
+pub const ELIMINATION_LIMIT: usize = 1024;
+
 pub struct LtDecoder {
     k: u16,
     block_len: usize,
@@ -247,11 +256,18 @@ pub struct LtDecoder {
     words_per_block: usize,
     solved: Vec<Option<Vec<u32>>>,
     pending: Vec<Option<Equation>>,
+    /// Live entries in `pending`.
+    pending_count: usize,
     by_block: Vec<BTreeSet<usize>>,
     seen: HashSet<u32>,
     solved_count: usize,
     unique_frames: usize,
     redundant_frames: usize,
+    /// Informative frames still to arrive before elimination can possibly
+    /// succeed. Every frame raises the system's rank by at most one, so after
+    /// a pass that came up `d` short, the next `d - 1` frames cannot fix it.
+    elimination_wait: usize,
+    eliminations: usize,
 }
 
 impl LtDecoder {
@@ -293,11 +309,14 @@ impl LtDecoder {
             words_per_block,
             solved: vec![None; k_usize],
             pending: Vec::new(),
+            pending_count: 0,
             by_block: (0..k_usize).map(|_| BTreeSet::new()).collect(),
             seen: HashSet::new(),
             solved_count: 0,
             unique_frames: 0,
             redundant_frames: 0,
+            elimination_wait: 0,
+            eliminations: 0,
         })
     }
 
@@ -330,23 +349,47 @@ impl LtDecoder {
         }
         if indices.len() == 1 {
             self.resolve(indices[0], words);
-            return Ok(if self.is_complete() {
-                AddFrame::Complete
-            } else {
-                AddFrame::Accepted
-            });
+        } else {
+            let equation_id = self.pending.len();
+            for index in &indices {
+                self.by_block[usize::from(*index)].insert(equation_id);
+            }
+            self.pending.push(Some(Equation { indices, words }));
+            self.pending_count += 1;
         }
 
-        let equation_id = self.pending.len();
-        for index in &indices {
-            self.by_block[usize::from(*index)].insert(equation_id);
+        self.elimination_wait = self.elimination_wait.saturating_sub(1);
+        if !self.is_complete() && self.elimination_due() {
+            self.eliminate();
         }
-        self.pending.push(Some(Equation { indices, words }));
-        Ok(AddFrame::Accepted)
+        Ok(if self.is_complete() {
+            AddFrame::Complete
+        } else {
+            AddFrame::Accepted
+        })
     }
 
     pub fn solved_count(&self) -> usize {
         self.solved_count
+    }
+
+    pub fn source_blocks(&self) -> u16 {
+        self.k
+    }
+
+    /// Whether source block `index` has been recovered.
+    pub fn is_solved(&self, index: usize) -> bool {
+        self.solved.get(index).is_some_and(Option::is_some)
+    }
+
+    /// Equations parked waiting on blocks peeling has not reached.
+    pub fn pending_equations(&self) -> usize {
+        self.pending_count
+    }
+
+    /// Elimination passes run so far, successful or not.
+    pub fn eliminations(&self) -> usize {
+        self.eliminations
     }
 
     pub fn unique_frames(&self) -> usize {
@@ -401,11 +444,126 @@ impl LtDecoder {
                     let equation = self.pending[equation_id]
                         .take()
                         .expect("degree-one equation remains pending");
+                    self.pending_count -= 1;
                     let remaining = equation.indices[0];
                     self.by_block[usize::from(remaining)].remove(&equation_id);
                     queue.push((remaining, equation.words));
                 }
             }
+        }
+    }
+
+    fn elimination_due(&self) -> bool {
+        let unknowns = usize::from(self.k) - self.solved_count;
+        self.elimination_wait == 0
+            && unknowns <= ELIMINATION_LIMIT
+            && self.pending_count >= unknowns
+            // A block no parked equation mentions is a zero column: no amount
+            // of elimination recovers it, so do not pay for trying. This is
+            // the common failure near the end of a repair half.
+            && self
+                .solved
+                .iter()
+                .zip(&self.by_block)
+                .all(|(solved, waiting)| solved.is_some() || !waiting.is_empty())
+    }
+
+    /// Solve every remaining block at once from the parked equations.
+    ///
+    /// Peeling alone stalls whenever no parked equation is down to one
+    /// unknown, which under loss is most of the carousel's repair half: a
+    /// degree-14 repair frame over a 40%-unsolved file still covers five or
+    /// six unknowns. Those equations are not useless, only unpeelable — once
+    /// there are as many independent ones as unknowns, the file is fully
+    /// determined. Waiting for the next systematic sweep instead costs up to
+    /// half a carousel of extra frames.
+    ///
+    /// Two passes, because the payload XORs dominate: a symbolic pass on
+    /// bitsets finds rank and a pivot set, and only a full-rank system pays
+    /// for the payload pass over that square subsystem.
+    fn eliminate(&mut self) {
+        self.eliminations += 1;
+        let unknown: Vec<u16> = (0..self.k)
+            .filter(|&block| self.solved[usize::from(block)].is_none())
+            .collect();
+        let columns = unknown.len();
+        let mut column_of = vec![usize::MAX; usize::from(self.k)];
+        for (column, &block) in unknown.iter().enumerate() {
+            column_of[usize::from(block)] = column;
+        }
+        let row_ids: Vec<usize> = (0..self.pending.len())
+            .filter(|&id| self.pending[id].is_some())
+            .collect();
+        let stride = columns.div_ceil(64);
+        let bits_of = |equation: &Equation| {
+            let mut row = vec![0_u64; stride];
+            for &index in &equation.indices {
+                let column = column_of[usize::from(index)];
+                row[column / 64] |= 1 << (column % 64);
+            }
+            row
+        };
+
+        // Symbolic forward elimination. A row chosen as pivot is its original
+        // equation plus earlier pivots only, so the chosen originals are
+        // themselves independent and form a square full-rank subsystem.
+        let mut rows: Vec<Vec<u64>> = row_ids
+            .iter()
+            .map(|&id| bits_of(self.pending[id].as_ref().expect("live row")))
+            .collect();
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        let mut pivots = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let (word, bit) = (column / 64, 1_u64 << (column % 64));
+            let Some(found) =
+                (pivots.len()..order.len()).find(|&r| rows[order[r]][word] & bit != 0)
+            else {
+                continue;
+            };
+            order.swap(pivots.len(), found);
+            let pivot = order[pivots.len()];
+            pivots.push(pivot);
+            let (head, pivot_row) = (word, rows[pivot].clone());
+            for &other in &order[pivots.len()..] {
+                if rows[other][word] & bit != 0 {
+                    for (left, right) in rows[other][head..].iter_mut().zip(&pivot_row[head..]) {
+                        *left ^= right;
+                    }
+                }
+            }
+        }
+        if pivots.len() < columns {
+            self.elimination_wait = columns - pivots.len();
+            return;
+        }
+
+        // Payload pass: Gauss-Jordan over the pivot rows only.
+        let mut system: Vec<(Vec<u64>, Vec<u32>)> = pivots
+            .iter()
+            .map(|&row| {
+                let equation = self.pending[row_ids[row]].as_ref().expect("live row");
+                (bits_of(equation), equation.words.clone())
+            })
+            .collect();
+        for column in 0..columns {
+            let (word, bit) = (column / 64, 1_u64 << (column % 64));
+            let found = (column..columns)
+                .find(|&r| system[r].0[word] & bit != 0)
+                .expect("a full-rank subsystem has a pivot in every column");
+            system.swap(column, found);
+            let (before, rest) = system.split_at_mut(column);
+            let (pivot, after) = rest.split_first_mut().expect("pivot row exists");
+            for (bits, words) in before.iter_mut().chain(after.iter_mut()) {
+                if bits[word] & bit != 0 {
+                    for (left, right) in bits.iter_mut().zip(&pivot.0) {
+                        *left ^= right;
+                    }
+                    xor_words(words, &pivot.1);
+                }
+            }
+        }
+        for (column, (_, words)) in system.into_iter().enumerate() {
+            self.resolve(unknown[column], words);
         }
     }
 }

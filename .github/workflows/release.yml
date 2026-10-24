@@ -13,8 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  receiver:
-    name: receiver bundle
+  web:
+    name: web bundle
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,17 +23,17 @@ jobs:
         with:
           version: v0.15.0
       # Built once and shared, so every platform archive carries byte-identical
-      # receiver assets. Building it per-platform would let them differ.
+      # web assets. Building it per-platform would let them differ.
       - run: ./scripts/build-web.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: receiver
-          path: web/receiver
+          name: web
+          path: web/app
           include-hidden-files: true
 
   package:
     name: ${{ matrix.target }}
-    needs: receiver
+    needs: web
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,8 +60,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: receiver
-          path: web/receiver
+          name: web
+          path: web/app
 
       - run: cargo build -p desktop-sender --release --target ${{ matrix.target }}
 
@@ -103,7 +103,7 @@ jobs:
             dist/*.zip
             dist/SHA256SUMS
           body: |
-            Optical Transfer — desktop sender and offline receiver.
+            Optical Transfer — desktop sender and the offline web app (receiver and browser sender).
 
             **This transfer is not encrypted.** Any camera pointed at the
             sending screen can read it.

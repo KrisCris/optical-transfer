@@ -11,7 +11,7 @@
 //! `QrFrame::pixels` to a camera is Task 7's, and pretending otherwise with a
 //! synthetic rasterise-then-reparse would test nothing but this file.
 
-use desktop_sender::{
+use optical_core::{
     qr::Ecc,
     transfer::{FRAME_BYTES_OPTIONS, Transfer, TransferSettings},
 };
@@ -46,6 +46,7 @@ fn a_text_snippet_survives_the_whole_pipeline() {
         media_type,
         bytes,
         is_text,
+        ..
     } = run(transfer, 6, 20_000)
     else {
         unreachable!("run only returns Complete")
@@ -76,6 +77,7 @@ fn a_binary_file_survives_the_whole_pipeline() {
         media_type,
         bytes,
         is_text,
+        ..
     } = run(transfer, 6, 40_000)
     else {
         unreachable!("run only returns Complete")

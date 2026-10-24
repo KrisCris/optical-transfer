@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Loopback benchmark</title>
+<style>
+  body { font: 13px/1.4 ui-monospace, Menlo, monospace; background: #111; color: #ddd; margin: 16px; }
+  .row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  #stage { width: 720px; height: 720px; background: #fff; display: grid; place-items: center; padding: 0; }
+  #camera, video { width: 400px; border: 1px solid #333; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<!--
+  Sender display → simulated camera → the real receive pipeline, in one page.
+
+  The sender's own CodeDisplay paints the stream; a 1280×960 "camera" canvas
+  re-films it each animation frame with scale, tilt, blur and contrast loss,
+  and captureStream() feeds that into a <video> exactly as getUserMedia would.
+  No lens, glare or rolling shutter — this measures the scheduling and decode
+  pipeline, which is what differs between receivers given the same light.
+
+  Parameters (query string): bytes, fps, codes, size, workers, blur, tilt,
+  policy=current|legacy (legacy replays the previous one-job-per-capture
+  scheduler for comparison), seed.
+-->
+<div class="row">
+  <div id="stage"><canvas id="sender"></canvas></div>
+  <div>
+    <canvas id="camera" width="1280" height="960"></canvas><br />
+    <video id="video" muted playsinline></video>
+  </div>
+</div>
+<pre id="out">starting…</pre>
+<script type="module">
+import init, { WasmReceiver } from "../pkg/optical_wasm.js";
+import { CodeDisplay } from "../code-display.js";
+import { CaptureLoop, DecodePool, RegionTracker } from "../capture.js";
+import { Telemetry } from "../telemetry.js";
+
+const params = new URLSearchParams(location.search);
+const number = (key, fallback) => Number(params.get(key) ?? fallback);
+const config = {
+  bytes: number("bytes", 2953), fps: number("fps", 60), codes: number("codes", 1),
+  size: number("size", 256 * 1024), workers: number("workers", 4), blur: number("blur", 0.6),
+  tilt: number("tilt", 2), policy: params.get("policy") ?? "current", seed: number("seed", 1),
+  timeout: number("timeout", 120),
+};
+const out = document.getElementById("out");
+const log = (value) => { out.textContent = JSON.stringify(value, null, 2); };
+
+/** The scheduler this receiver shipped with before the rewrite: one job per
+ *  capture, full scan every 500 ms, every sighting becomes a crop target. */
+class LegacyTracker {
+  constructor() { this.regions = []; this.lastFullScan = 0; this.expected = 0; }
+  decodedCount() { return this.regions.filter((r) => r.decoded).length; }
+  mode() { return this.decodedCount() ? "locked" : "acquiring"; }
+  noteDecoded(box, now, quad, modules) {
+    const overlaps = (a) => a.x < box.x + box.w && box.x < a.x + a.w && a.y < box.y + box.h && box.y < a.y + a.h;
+    this.regions = this.regions.filter((r) => !overlaps(r));
+    this.regions.push({ ...box, quad, modules, seen: now, decoded: true });
+  }
+  noteSighting(box, now) { this.regions.push({ ...box, seen: now, decoded: false }); }
+  plan(now, slots, width, height) {
+    this.regions = this.regions.filter((r) => now - r.seen < 900);
+    if (this.regions.length && now - this.lastFullScan < 500) {
+      const r = this.regions[0];
+      this.regions.push(this.regions.shift());
+      const pad = Math.max(16, Math.round(Math.max(r.w, r.h) * 0.25));
+      const x = Math.max(0, Math.floor(r.x - pad));
+      const y = Math.max(0, Math.floor(r.y - pad));
+      const w = Math.min(width - x, Math.ceil(r.w + pad * 2));
+      const h = Math.min(height - y, Math.ceil(r.h + pad * 2));
+      return { full: false, crops: w > 0 && h > 0 ? [{ x, y, w, h, quad: r.quad, modules: r.modules }] : [] };
+    }
+    this.lastFullScan = now;
+    return { full: true, crops: [] };
+  }
+}
+
+function payload(size, seed) {
+  const bytes = new Uint8Array(size);
+  let state = seed >>> 0 || 1;
+  for (let index = 0; index < size; index++) {
+    state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+    bytes[index] = state & 0xff;
+  }
+  return bytes;
+}
+
+await init();
+const source = payload(config.size, config.seed);
+
+// ---- sender
+const stage = document.getElementById("stage");
+const display = new CodeDisplay(document.getElementById("sender"), stage);
+const sender = new Worker(new URL("../send-worker.js", import.meta.url), { type: "module" });
+const info = await new Promise((resolve, reject) => {
+  sender.onmessage = ({ data }) => {
+    if (data.type === "ready") resolve(data.info);
+    else if (data.type === "error") reject(new Error(data.message));
+    else if (data.type === "frames") display.receive(data.modules, data.count, data.frameSize);
+  };
+  sender.postMessage({
+    type: "prepare", kind: "files", files: [new File([source], "bench.bin")], paths: [""], text: "",
+    settings: { frameBytes: config.bytes, fps: config.fps, ecc: "L" },
+  });
+});
+display.configure({ fps: config.fps, codes: config.codes }, info);
+display.start((count) => sender.postMessage({ type: "frames", count }));
+
+// ---- camera
+const senderCanvas = document.getElementById("sender");
+const camera = document.getElementById("camera");
+const cameraContext = camera.getContext("2d");
+function film() {
+  requestAnimationFrame(film);
+  cameraContext.filter = "none";
+  cameraContext.fillStyle = "#6c6f74";
+  cameraContext.fillRect(0, 0, camera.width, camera.height);
+  const side = camera.height * 0.86;
+  const scale = side / Math.max(senderCanvas.width, senderCanvas.height);
+  cameraContext.save();
+  cameraContext.translate(camera.width / 2, camera.height / 2);
+  cameraContext.rotate((config.tilt * Math.PI) / 180);
+  cameraContext.filter = `blur(${config.blur}px) contrast(0.8) brightness(0.95)`;
+  cameraContext.imageSmoothingEnabled = true;
+  const w = senderCanvas.width * scale;
+  const h = senderCanvas.height * scale;
+  cameraContext.fillStyle = "#fff";
+  cameraContext.fillRect(-w / 2 - 20, -h / 2 - 20, w + 40, h + 40);
+  cameraContext.drawImage(senderCanvas, -w / 2, -h / 2, w, h);
+  cameraContext.restore();
+}
+film();
+const video = document.getElementById("video");
+video.srcObject = camera.captureStream(60);
+await video.play();
+if (config.policy === "legacy") {
+  // The old receiver polled on animation frames rather than camera frames.
+  Object.defineProperty(video, "requestVideoFrameCallback", { value: undefined });
+}
+
+// ---- receiver
+const receiver = new WasmReceiver();
+const telemetry = new Telemetry();
+const tracker = config.policy === "legacy" ? new LegacyTracker() : new RegionTracker();
+let completedAt = null;
+let result = null;
+const pool = new DecodePool(
+  () => new Worker(new URL("../decode-worker.js", import.meta.url), { type: "module" }),
+  (job, reply) => {
+    if (!job || completedAt !== null) return;
+    const now = performance.now();
+    telemetry.reply(now, job, reply);
+    for (const box of reply.sightings ?? []) tracker.noteSighting(box, now);
+    for (const symbol of reply.symbols ?? []) {
+      tracker.noteDecoded(symbol.box, now, symbol.quad, symbol.modules);
+      const outcome = receiver.addFrame(symbol.bytes);
+      const kind = outcome & 0x0f;
+      if (kind === 1 || kind === 2) {
+        if (outcome & 0x80) telemetry.setStats(receiver.stats());
+        telemetry.accepted(now, job.capturedAt, (outcome & 0x40) !== 0, (outcome & 0x80) !== 0, telemetry.stats?.blockLen);
+      }
+      if (kind === 2) {
+        completedAt = now;
+        telemetry.setStats(receiver.stats());
+        telemetry.completed(now);
+        const received = receiver.takeResult();
+        const bytes = received.bytes;
+        result = bytes.length === source.length && bytes.every((value, index) => value === source[index]);
+        break;
+      }
+    }
+  },
+);
+pool.resize(config.workers);
+telemetry.workers = config.workers;
+const loop = new CaptureLoop({
+  video, pool, tracker,
+  onCapture: (now, plan) => telemetry.capture(now, plan),
+  onDropped: (now) => telemetry.dropped(now),
+});
+const startedAt = performance.now();
+loop.start();
+
+function report(final) {
+  const now = performance.now();
+  telemetry.setStats(receiver.stats());
+  const snap = telemetry.snapshot(now);
+  const value = {
+    config, final, verified: result,
+    seconds: Number(snap.elapsed.toFixed(2)),
+    averageKiBs: Number(snap.averageKiBs.toFixed(1)),
+    peakKiBs: Number(snap.peakKiBs.toFixed(1)),
+    wallSeconds: Number(((now - startedAt) / 1000).toFixed(1)),
+    k: info.sourceBlocks, qrVersion: info.qrVersion,
+    stats: snap.stats,
+    catchRate: snap.catchRate && Number(snap.catchRate.toFixed(3)),
+    overhead: snap.overhead && Number(snap.overhead.toFixed(3)),
+    captureFps: Number(snap.captureFps.toFixed(1)),
+    decodeFps: Number(snap.decodeFps.toFixed(1)),
+    symbolFps: Number(snap.symbolFps.toFixed(1)),
+    utilization: Number(snap.utilization.toFixed(2)),
+    totals: snap.totals,
+    latency: Object.fromEntries(Object.entries(snap.latency).map(([key, value]) => [key, Number(value.toFixed(1))])),
+    codesLocked: tracker.decodedCount(),
+    senderHz: display.refreshHz() && Number(display.refreshHz().toFixed(1)),
+    framesShown: display.shown,
+  };
+  log(value);
+  return value;
+}
+const timer = setInterval(() => {
+  const done = completedAt !== null || performance.now() - startedAt > config.timeout * 1000;
+  window.benchResult = report(done);
+  if (done) {
+    clearInterval(timer);
+    loop.stop();
+    display.stop();
+    sender.terminate();
+    pool.resize(0);
+  }
+}, 500);
+</script>
+</body>
+</html>

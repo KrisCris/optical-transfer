@@ -9,7 +9,7 @@ use optical_core::{
     protocol::{FrameHeader, SplitMix32, fnv1a, pack_frame},
     snippet::pack_snippet,
 };
-use optical_wasm::{ReceiverEvent, ReceiverState, frame_budget};
+use optical_wasm::{ReceiverEvent, ReceiverState, ReceiverStats, frame_budget};
 
 const BLOCK_LEN: usize = 1445;
 const SESSION: u16 = 0x4d2;
@@ -81,8 +81,14 @@ fn a_lossy_snippet_stream_completes_with_the_bytes_that_were_sent() {
             media_type,
             bytes,
             is_text,
+            new_stream,
+            stats,
         } = receiver.add_frame(&sender.frame(seq))
         {
+            assert!(!new_stream, "a multi-frame completion continues its stream");
+            assert_eq!(stats.solved_blocks, usize::from(sender.source_blocks()));
+            assert_eq!(stats.solved_blocks, stats.total_blocks);
+            assert_eq!(stats.total_bytes, packed.container.len());
             completed = Some((name, media_type, bytes, is_text));
             break;
         }
@@ -112,8 +118,14 @@ fn a_lossy_binary_stream_completes_with_the_bytes_that_were_sent() {
             media_type,
             bytes,
             is_text,
+            new_stream,
+            stats,
         } = receiver.add_frame(&sender.frame(seq))
         {
+            assert!(!new_stream, "a multi-frame completion continues its stream");
+            assert_eq!(stats.solved_blocks, usize::from(sender.source_blocks()));
+            assert_eq!(stats.solved_blocks, stats.total_blocks);
+            assert_eq!(stats.total_bytes, packed.container.len());
             completed = Some((name, media_type, bytes, is_text));
             break;
         }
@@ -129,6 +141,15 @@ fn a_lossy_binary_stream_completes_with_the_bytes_that_were_sent() {
 #[test]
 fn a_foreign_qr_code_is_ignored_without_touching_stream_state() {
     let mut receiver = ReceiverState::new();
+    let packed = pack_file("noise.bin", "application/octet-stream", &noise(4096)).unwrap();
+    let sender = Sender::new(&packed.container);
+    assert!(matches!(
+        receiver.add_frame(&sender.frame(0)),
+        ReceiverEvent::Progress {
+            new_stream: true,
+            ..
+        }
+    ));
     assert!(matches!(
         receiver.add_frame(b"https://example.invalid/not-a-decimen-frame"),
         ReceiverEvent::Ignored
@@ -139,6 +160,18 @@ fn a_foreign_qr_code_is_ignored_without_touching_stream_state() {
     assert!(matches!(
         receiver.add_frame(&[0xd1, 0xc3, 3, 0]),
         ReceiverEvent::Ignored
+    ));
+    assert!(matches!(
+        receiver.add_frame(&sender.frame(1)),
+        ReceiverEvent::Progress {
+            new_stream: false,
+            stats: ReceiverStats {
+                unique_frames: 2,
+                duplicate_frames: 0,
+                ..
+            },
+            ..
+        }
     ));
 }
 
@@ -169,23 +202,35 @@ fn progress_reports_the_stream_the_receiver_actually_locked_onto() {
     let sender = Sender::new(&packed.container);
     let mut receiver = ReceiverState::new();
 
-    let ReceiverEvent::Progress {
-        unique_frames,
-        solved_blocks,
-        total_blocks,
-    } = receiver.add_frame(&sender.frame(0))
-    else {
+    let ReceiverEvent::Progress { stats, new_stream } = receiver.add_frame(&sender.frame(0)) else {
         panic!("the first frame of a fresh stream is progress");
     };
-    assert_eq!(unique_frames, 1);
-    assert_eq!(solved_blocks, 1);
-    assert_eq!(total_blocks, packed.container.len().div_ceil(BLOCK_LEN));
+    assert_eq!(stats.unique_frames, 1);
+    assert!(new_stream);
+    assert_eq!(stats.solved_blocks, 1);
+    assert_eq!(stats.duplicate_frames, 0);
+    assert_eq!(stats.redundant_frames, 0);
+    assert_eq!(stats.block_len, BLOCK_LEN);
+    assert_eq!(stats.total_bytes, packed.container.len());
+    assert_eq!(
+        stats.total_blocks,
+        packed.container.len().div_ceil(BLOCK_LEN)
+    );
 
     // A repeat of a frame already seen is progress, not new information.
-    let ReceiverEvent::Progress { unique_frames, .. } = receiver.add_frame(&sender.frame(0)) else {
+    let ReceiverEvent::Progress {
+        stats, new_stream, ..
+    } = receiver.add_frame(&sender.frame(0))
+    else {
         panic!("a duplicate frame is still progress");
     };
-    assert_eq!(unique_frames, 1);
+    assert_eq!(stats.unique_frames, 1);
+    assert_eq!(stats.duplicate_frames, 1);
+    assert_eq!(stats.redundant_frames, 0);
+    assert!(
+        !new_stream,
+        "a duplicate first frame must not restart the timer"
+    );
 }
 
 #[test]
@@ -209,28 +254,109 @@ fn a_stream_whose_checksum_disagrees_never_reaches_the_caller() {
         matches!(event, ReceiverEvent::Failed { .. }),
         "a stream-checksum mismatch must fail, not complete: {event:?}"
     );
+    assert!(matches!(
+        receiver.add_frame(&sender.frame_with(header, &sender.encoder.encode(0))),
+        ReceiverEvent::Progress {
+            new_stream: true,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn a_new_stream_replaces_the_one_before_it() {
-    let first =
-        pack_snippet(&"the first transfer, long enough to need blocks. ".repeat(200)).unwrap();
+    let first = pack_file("first.bin", "application/octet-stream", &noise(8 * 1024)).unwrap();
     let second = pack_file("second.bin", "application/octet-stream", &noise(40 * 1024)).unwrap();
     let first_sender = Sender::new(&first.container);
     let second_sender = Sender::new(&second.container);
+    assert_eq!(
+        first_sender.header.session_id,
+        second_sender.header.session_id
+    );
 
     let mut receiver = ReceiverState::new();
     receiver.add_frame(&first_sender.frame(0));
-    receiver.add_frame(&first_sender.frame(1));
+    assert!(matches!(
+        receiver.add_frame(&first_sender.frame(1)),
+        ReceiverEvent::Progress {
+            new_stream: false,
+            stats: ReceiverStats {
+                unique_frames: 2,
+                duplicate_frames: 0,
+                ..
+            },
+            ..
+        }
+    ));
 
-    let ReceiverEvent::Progress { unique_frames, .. } = receiver.add_frame(&second_sender.frame(0))
+    receiver.add_frame(&first_sender.frame(0));
+    receiver.add_frame(&first_sender.frame(u32::from(first_sender.source_blocks()) * 2));
+    let ReceiverEvent::Progress {
+        stats, new_stream, ..
+    } = receiver.add_frame(&second_sender.frame(0))
     else {
         panic!("the first frame of the new stream is progress");
     };
     assert_eq!(
-        unique_frames, 1,
+        stats.unique_frames, 1,
         "the previous stream's frames must not be counted against the new one"
     );
+    assert_eq!(stats.duplicate_frames, 0);
+    assert_eq!(stats.redundant_frames, 0);
+    assert!(
+        new_stream,
+        "identity changes restart timing even with the same session id"
+    );
+}
+
+#[test]
+fn an_explicit_reset_starts_timing_again_for_the_same_stream() {
+    let packed = pack_file("noise.bin", "application/octet-stream", &noise(4096)).unwrap();
+    let sender = Sender::new(&packed.container);
+    let mut receiver = ReceiverState::new();
+    receiver.add_frame(&sender.frame(0));
+    receiver.add_frame(&sender.frame(0));
+    receiver.add_frame(&sender.frame(u32::from(sender.source_blocks()) * 2));
+    receiver.reset();
+    assert!(matches!(
+        receiver.add_frame(&sender.frame(0)),
+        ReceiverEvent::Progress {
+            new_stream: true,
+            stats: ReceiverStats {
+                unique_frames: 1,
+                duplicate_frames: 0,
+                redundant_frames: 0,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_one_frame_file_or_snippet_starts_and_completes_timing_in_one_event() {
+    let file = pack_file("small.bin", "application/octet-stream", &[1, 2, 3]).unwrap();
+    let snippet = pack_snippet("short text").unwrap();
+    for container in [&file.container, &snippet.container] {
+        let sender = Sender::new(container);
+        assert_eq!(sender.source_blocks(), 1);
+        let mut receiver = ReceiverState::new();
+        assert!(matches!(
+            receiver.add_frame(&sender.frame(0)),
+            ReceiverEvent::Complete {
+                new_stream: true,
+                stats: ReceiverStats {
+                    unique_frames: 1,
+                    duplicate_frames: 0,
+                    redundant_frames: 0,
+                    solved_blocks: 1,
+                    total_blocks: 1,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
 }
 
 #[test]
@@ -275,8 +401,61 @@ fn a_stream_that_will_not_converge_is_abandoned_rather_than_grown() {
     assert!(matches!(
         receiver.add_frame(&sender.frame(0)),
         ReceiverEvent::Progress {
-            unique_frames: 1,
+            stats: ReceiverStats {
+                unique_frames: 1,
+                duplicate_frames: 0,
+                redundant_frames: 0,
+                ..
+            },
+            new_stream: true,
             ..
         }
     ));
+}
+
+#[test]
+fn duplicate_and_redundant_frames_remain_distinct_in_final_stats() {
+    let packed = pack_file("noise.bin", "application/octet-stream", &noise(8192)).unwrap();
+    let sender = Sender::new(&packed.container);
+    let k = u32::from(sender.source_blocks());
+    let mut receiver = ReceiverState::new();
+    receiver.add_frame(&sender.frame(0));
+    receiver.add_frame(&sender.frame(0));
+    let ReceiverEvent::Progress { stats, .. } = receiver.add_frame(&sender.frame(2 * k)) else {
+        panic!("a new sequence for an already solved block is still progress");
+    };
+    assert_eq!(stats.unique_frames, 2);
+    assert_eq!(stats.duplicate_frames, 1);
+    assert_eq!(stats.redundant_frames, 1);
+    assert_eq!(stats.solved_blocks, 1);
+    let mut event = ReceiverEvent::Ignored;
+    for seq in 1..k {
+        event = receiver.add_frame(&sender.frame(seq));
+    }
+    let ReceiverEvent::Complete { stats, .. } = event else {
+        panic!("systematic source frames must complete the transfer");
+    };
+    assert_eq!(stats.unique_frames, k as usize + 1);
+    assert_eq!(stats.duplicate_frames, 1);
+    assert_eq!(stats.redundant_frames, 1);
+    assert_eq!(stats.solved_blocks, k as usize);
+    assert_eq!(stats.total_blocks, k as usize);
+    assert_eq!(stats.block_len, BLOCK_LEN);
+    assert_eq!(stats.total_bytes, packed.container.len());
+}
+
+#[test]
+fn a_pending_repair_equation_is_unique_even_without_solving_a_block() {
+    let packed = pack_file("noise.bin", "application/octet-stream", &noise(8192)).unwrap();
+    let sender = Sender::new(&packed.container);
+    let mut receiver = ReceiverState::new();
+    let ReceiverEvent::Progress { stats, .. } =
+        receiver.add_frame(&sender.frame(u32::from(sender.source_blocks())))
+    else {
+        panic!("the first repair equation must remain pending");
+    };
+    assert_eq!(stats.unique_frames, 1);
+    assert_eq!(stats.duplicate_frames, 0);
+    assert_eq!(stats.redundant_frames, 0);
+    assert_eq!(stats.solved_blocks, 0);
 }

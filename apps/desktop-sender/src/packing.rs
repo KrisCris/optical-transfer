@@ -18,14 +18,18 @@ use std::{
     thread,
 };
 
-use crate::transfer::{StartError, Transfer, TransferSettings};
+use optical_core::{
+    bundle::{SelectedFile, bundle_files},
+    transfer::{Transfer, TransferSettings},
+};
 
 /// What the UI should put on screen right now.
 pub enum PackingState {
     /// Still working. The UI shows a preparation state and keeps repainting.
     Busy,
     Ready(Box<Transfer>),
-    Failed(StartError),
+    /// Refused, with the reason in words the UI can show as they are.
+    Failed(String),
     /// The worker thread died without answering, which should not happen.
     Lost,
 }
@@ -36,7 +40,7 @@ pub enum PackingState {
 /// nowhere, which is the correct behaviour when a user picks a different file
 /// while the first is still compressing.
 pub struct PackingJob {
-    receiver: Receiver<Result<Transfer, StartError>>,
+    receiver: Receiver<Result<Transfer, String>>,
     label: String,
 }
 
@@ -53,8 +57,34 @@ impl PackingJob {
         let label = name.clone();
         let (sender, receiver) = channel();
         thread::spawn(move || {
-            let result = Transfer::from_file(&name, &media_type, &bytes, settings, session_id);
+            let result = Transfer::from_file(&name, &media_type, &bytes, settings, session_id)
+                .map_err(|error| error.to_string());
             // A closed channel means the UI moved on. Nothing to report to.
+            let _ = sender.send(result);
+        });
+        Self { receiver, label }
+    }
+
+    /// Start packing a selection: one file as itself, several files or a folder
+    /// as one stored ZIP — the same rule the browser sender follows, so a
+    /// receiver cannot tell which sender it is watching.
+    pub fn files(files: Vec<SelectedFile>, settings: TransferSettings, session_id: u16) -> Self {
+        let label = match files.as_slice() {
+            [only] if only.relative_path.is_none() => only.name.clone(),
+            _ => format!("{} files", files.len()),
+        };
+        let (sender, receiver) = channel();
+        thread::spawn(move || {
+            let result = bundle_files(files).and_then(|file| {
+                Transfer::from_file(
+                    &file.name,
+                    &file.media_type,
+                    &file.bytes,
+                    settings,
+                    session_id,
+                )
+                .map_err(|error| error.to_string())
+            });
             let _ = sender.send(result);
         });
         Self { receiver, label }
@@ -68,7 +98,9 @@ impl PackingJob {
     pub fn text(text: String, settings: TransferSettings, session_id: u16) -> Self {
         let (sender, receiver) = channel();
         thread::spawn(move || {
-            let _ = sender.send(Transfer::from_text(&text, settings, session_id));
+            let result =
+                Transfer::from_text(&text, settings, session_id).map_err(|error| error.to_string());
+            let _ = sender.send(result);
         });
         Self {
             receiver,

@@ -4,7 +4,7 @@
 Deliberately Python and not a shell script: this has to produce identical
 layouts on Windows, macOS and Linux runners, and the shell does not.
 
-The release carries the sender, the whole receiver bundle, and the legal files
+The release carries the sender, the whole web bundle (receiver and browser sender), and the legal files
 that make distributing an AGPL derivative lawful. SOURCE.txt is written here
 rather than checked in because it has to name the *commit being packaged* --
 a stale source pointer is worse than none, since it looks like an answer.
@@ -87,8 +87,8 @@ def make_macos_bundle(staging: Path, binary: Path, version: str) -> Path:
     return app
 
 
-def copy_receiver(destination: Path) -> None:
-    source = ROOT / "web" / "receiver"
+def copy_web(destination: Path) -> None:
+    source = ROOT / "web" / "app"
     for required in ("pkg/optical_wasm_bg.wasm", "vendor/decimen-codec/decimen_codec.wasm"):
         if not (source / required).is_file():
             raise SystemExit(
@@ -142,7 +142,7 @@ def main() -> int:
         (staging / binary.name).chmod(0o755)
     for name in ("LICENSE", "NOTICE.md", "README.md"):
         shutil.copy2(ROOT / name, staging / name)
-    copy_receiver(staging / "receiver")
+    copy_web(staging / "web")
 
     commit = git("rev-parse", "HEAD")
     (staging / "SOURCE.txt").write_text(
@@ -153,7 +153,7 @@ def main() -> int:
         "repository: see NOTICE.md for the upstream this is derived from\n\n"
         "This program is licensed AGPL-3.0-or-later. You are entitled to the\n"
         "complete corresponding source for this build, including the source of\n"
-        "the vendored decimen-codec decoder in receiver/vendor/. If you received\n"
+        "the vendored decimen-codec decoder in web/vendor/. If you received\n"
         "this archive without a way to obtain that source, whoever gave it to you\n"
         "has not met the licence's terms — ask them for it.\n\n"
         "Upstream baseline: Decimen Optical Transfer v0.5.3,\n"

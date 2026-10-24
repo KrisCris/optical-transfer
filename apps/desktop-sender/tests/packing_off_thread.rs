@@ -12,10 +12,8 @@
 
 use std::time::{Duration, Instant};
 
-use desktop_sender::{
-    packing::{PackingJob, PackingState},
-    transfer::TransferSettings,
-};
+use desktop_sender::packing::{PackingJob, PackingState};
+use optical_core::transfer::TransferSettings;
 
 /// Big enough that packing is real work, incompressible so the gzip attempt
 /// cannot short-circuit it.

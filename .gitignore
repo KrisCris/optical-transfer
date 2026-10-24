@@ -3,12 +3,13 @@
 # wrote .gitignore fresh rather than adding to it, which silently undid that.
 .worktrees/
 .superpowers/
+.claude/worktrees/
 
 /target/
 /.tooling/
-/web/receiver/pkg/
+/web/app/pkg/
 /dist/
 .DS_Store
 # Copied in by scripts/build-web.sh from the checked-in vendor/ tree, so the
 # served bundle is self-contained without the binary living in two places.
-/web/receiver/vendor/
+/web/app/vendor/
