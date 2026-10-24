@@ -47,6 +47,7 @@ def digest(path: Path) -> str:
 
 APP_NAME = "Optical Transfer"
 BUNDLE_ID = "org.opticaltransfer.sender"
+CAMERA_USAGE = "Optical Transfer reads the QR codes another screen shows to receive a file."
 
 
 def make_macos_bundle(staging: Path, binary: Path, version: str) -> Path:
@@ -81,6 +82,13 @@ def make_macos_bundle(staging: Path, binary: Path, version: str) -> Path:
         # eligible for App Nap or display sleep while it is streaming.
         "  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>\n"
         "  <key>NSHighResolutionCapable</key><true/>\n"
+        # Receive mode reads a camera. Without a usage string macOS kills the
+        # app the moment it asks; without the Continuity key an iPhone shows
+        # up only under the generic external-camera type, if at all.
+        "  <key>NSCameraUsageDescription</key><string>"
+        + CAMERA_USAGE
+        + "</string>\n"
+        "  <key>NSCameraUseContinuityCameraDeviceType</key><true/>\n"
         "</dict>\n"
         "</plist>\n"
     )

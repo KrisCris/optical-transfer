@@ -3,17 +3,16 @@
 //! The browser-facing edge of the optical sender and receiver.
 //!
 //! This crate is deliberately thin. All of the protocol lives in
-//! `optical-core`, all of the receive-side sequencing lives in
+//! `optical-core`, including the receive-side sequencing in
 //! [`ReceiverState`], and the only thing the `wasm_bindgen` layer adds is
 //! serialisation — so a phone and a test binary run the same code, and there is
 //! no second implementation of the wire format written in JavaScript.
 
-mod receiver;
 mod sender;
 
 pub use sender::{SenderInfo, SenderState};
 
-pub use receiver::{
+pub use optical_core::receiver::{
     MAX_FRAMES_PER_SOURCE_BLOCK, MIN_FRAME_BUDGET, ReceiverEvent, ReceiverState, ReceiverStats,
     frame_budget,
 };

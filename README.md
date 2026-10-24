@@ -27,7 +27,7 @@ generated ZIPs are validated and sanitized before sending.
 | --- | --- |
 | `crates/optical-core` | Protocol, fountain code, containers, ZIP bundling, transfer and QR renderer. Platform-neutral, no I/O. |
 | `crates/optical-wasm` | Sender and receiver state plus `wasm-bindgen` wrappers. |
-| `apps/desktop-sender` | The native sender, an `eframe` window. |
+| `apps/desktop-sender` | The native app, an `eframe` window. Sends everywhere; receives through a camera on macOS (the `receive` feature). |
 | `web/app` | The offline Send/Receive PWA. |
 | `vendor/decimen-codec` | The pinned zxing-cpp QR decoder build, checksummed. |
 | `scripts/upstream-conformance` | Cross-implementation checks against the upstream baseline. |
@@ -49,6 +49,7 @@ cargo test --workspace                 # protocol, fountain, both ends
 node --test web/app/tests/*.test.mjs   # capture scheduler, telemetry, flip clock
 ./scripts/build-web.sh                 # wasm, vendor and static checks
 cargo run -p desktop-sender --release  # or: … -- report.pdf photos/
+cargo run -p desktop-sender --release --features receive  # macOS, adds Receive
 ```
 
 ## Using it
@@ -78,6 +79,20 @@ sending*, then *Full screen* (or F). Escape or a click leaves full screen.
 Several files or a folder travel as one `transfer.zip`, built by the same code
 as the browser sender's. Hidden files and symbolic links inside a folder are
 skipped.
+
+**Desktop receiver (macOS).** Built with `--features receive`, the window gets
+a *Send / Receive* switch. Receive opens a camera through AVFoundation and
+prefers an iPhone or iPad used as a Continuity Camera, since a Mac's built-in
+camera faces the user rather than the other screen. It asks for 1280×960 at
+60 fps and takes the closest format the camera offers. Codes are decoded by
+zxing-cpp on a pool of threads, scheduled the way the web receiver schedules
+them: one padded crop per locked code, with a full-frame scan every 100, 250
+or 1500 ms depending on how many codes are locked. Frames that arrive while
+every thread is busy are dropped rather than queued. The panel shows the same
+preview, progress, rate chart, block map and telemetry as the web receiver,
+and a finished file is offered for saving. Run from `cargo run` the binary is
+not an app bundle, so macOS attributes the camera to the terminal that started
+it; the packaged `.app` asks for itself.
 
 **Web app.** Serve `web/app/` and open it on both devices. Browsers grant the
 camera only to a secure page; `localhost` qualifies, but a phone needs HTTPS:
@@ -196,7 +211,8 @@ node scripts/loopback-bench.mjs --runs "codes=4&fps=60" --repeat 3
 - A frame numbers its source blocks in 16 bits, so small frame sizes cap out
   well below the file limit — about 30 MB at 500 bytes per code. The sender
   refuses before starting and names a setting from its own list that works.
-- The desktop app sends only; receiving is the web app's job.
+- The desktop app receives on macOS only. Windows and Linux builds send, and
+  receiving there is the web app's job.
 - The first release targets Windows x86-64, Linux x86-64, macOS x86-64, macOS
   arm64, and modern iOS and Android browsers.
 

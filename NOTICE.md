@@ -15,5 +15,10 @@ The upstream project incorporates zxing-cpp
 Version 2.0. Any vendored zxing-cpp artifacts must retain their accompanying
 Apache-2.0 license and notices.
 
+The macOS desktop build compiles zxing-cpp 3.1.1 from source (through the
+`zxing-cpp` crate) and links it statically for its Receive mode. It is used
+unmodified under the same Apache License, Version 2.0; every release archive
+carries that license as `web/vendor/decimen-codec/LICENSE.zxing-cpp`.
+
 Portions contributed upstream by Steve Dakh are incorporated under their MIT
 License terms; see the pinned upstream NOTICE for the full attribution.

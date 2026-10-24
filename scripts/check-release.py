@@ -85,6 +85,15 @@ def check(root: Path) -> list[str]:
             "no sender executable: expected one of " + ", ".join(SENDER_CANDIDATES)
         )
 
+    # A macOS build that receives must say why it wants the camera, or the
+    # system terminates it on the first camera request.
+    plist = root / "Optical Transfer.app" / "Contents" / "Info.plist"
+    if plist.is_file():
+        text = plist.read_text()
+        for key in ("NSCameraUsageDescription", "NSCameraUseContinuityCameraDeviceType"):
+            if f"<key>{key}</key>" not in text:
+                failures.append(f"Info.plist does not carry {key}")
+
     source = root / "SOURCE.txt"
     if source.is_file():
         text = source.read_text()

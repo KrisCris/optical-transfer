@@ -1,17 +1,17 @@
 //! The receive-side state machine.
 //!
 //! Deliberately a plain Rust type with no `wasm_bindgen` in sight. The browser
-//! is one caller of this logic, not its owner: keeping the state machine
-//! ordinary means it can be driven from a test binary at full speed, and means
-//! there is exactly one implementation of the protocol rather than a Rust one
-//! and a JavaScript one that drift.
+//! and the desktop app are both callers of this logic, not its owners: keeping
+//! the state machine ordinary means it can be driven from a test binary at full
+//! speed, and means there is exactly one implementation of the protocol rather
+//! than one per receiver that drift.
 //!
 //! Everything reaching [`ReceiverState::add_frame`] came off a camera and is
 //! untrusted. Nothing about a payload is exposed until two independent checks
 //! agree: the frame header's FNV-1a over the assembled container, and the
 //! container's own SHA-256 over the file it carries.
 
-use optical_core::{
+use crate::{
     OpticalError,
     container::{unpack_file, verify_file},
     fountain::{AddFrame, LtDecoder},
@@ -21,7 +21,6 @@ use optical_core::{
     },
     snippet::{is_snippet, snippet_text},
 };
-use serde::Serialize;
 
 /// Unique frames a stream may spend per source block before the receiver stops
 /// holding state for it.
@@ -54,8 +53,9 @@ pub fn frame_budget(source_blocks: u16) -> usize {
 const MAX_MEDIA_TYPE_LEN: usize = 255;
 
 /// Decoder counters and container dimensions for the current stream.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct ReceiverStats {
     pub unique_frames: usize,
     pub duplicate_frames: usize,
@@ -79,8 +79,9 @@ pub struct ReceiverStats {
 ///
 /// `kind` is the tag on the wire to JavaScript, so the variants are the whole
 /// receiver API — a browser never inspects protocol state directly.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "kind", rename_all = "camelCase"))]
 pub enum ReceiverEvent {
     /// Not ours, or too damaged to say anything true about. Silent on purpose:
     /// the camera decodes every QR code in view, including the ones on a shop
@@ -90,15 +91,15 @@ pub enum ReceiverEvent {
     /// would be worse than saying something — a version mismatch otherwise
     /// looks exactly like bad lighting.
     Incompatible { message: String },
-    #[serde(rename_all = "camelCase")]
+    #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
     Progress {
         /// This frame started a new stream, including an identity replacement.
         new_stream: bool,
-        #[serde(flatten)]
+        #[cfg_attr(feature = "serde", serde(flatten))]
         stats: ReceiverStats,
     },
     /// Verified. Both checks passed; these bytes are what the sender sent.
-    #[serde(rename_all = "camelCase")]
+    #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
     Complete {
         /// A one-frame transfer started and completed in this event.
         new_stream: bool,
@@ -372,8 +373,8 @@ fn finish(
 /// `Blob` on the other side of the boundary, so it is reduced to the printable
 /// ASCII a media type is actually made of before it leaves this crate.
 ///
-/// `optical-core` keeps the sender's bytes as they were, deliberately: it
-/// mirrors upstream and is not the trust boundary. This is.
+/// The container module keeps the sender's bytes as they were, deliberately:
+/// it mirrors upstream and is not the trust boundary. This is.
 fn safe_media_type(media_type: &str) -> String {
     let cleaned: String = media_type
         .chars()

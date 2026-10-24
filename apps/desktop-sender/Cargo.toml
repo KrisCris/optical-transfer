@@ -19,3 +19,39 @@ mime_guess = "2.0.5"
 optical-core = { path = "../../crates/optical-core" }
 rand = "0.10.2"
 rfd = "0.17.2"
+# The QR reader for Receive mode: upstream zxing-cpp, the same engine the web
+# receiver runs as WebAssembly, built from source with cmake. Behind the
+# `receive` feature so a sender-only build needs no C++ toolchain.
+zxing-cpp = { version = "0.5.3", features = ["bundled"], optional = true }
+# Camera names: people style their phone's name in mathematical letters that
+# the UI font has no glyphs for; compatibility normalisation folds them back.
+unicode-normalization = { version = "0.1.26", optional = true }
+
+# AVFoundation capture for Receive mode on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
+dispatch2 = { version = "0.3.1", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true, features = ["block2", "dispatch2", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3.2", optional = true, features = ["objc2-core-video"] }
+objc2-core-video = { version = "0.3.2", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+
+[features]
+# Receive mode: a camera, a QR decoder pool and the shared receiver. Camera
+# capture exists only on macOS; elsewhere the mode builds but has no camera.
+receive = [
+  "dep:zxing-cpp",
+  "dep:unicode-normalization",
+  "dep:block2",
+  "dep:dispatch2",
+  "dep:objc2",
+  "dep:objc2-av-foundation",
+  "dep:objc2-core-media",
+  "dep:objc2-core-video",
+  "dep:objc2-foundation",
+]
+
+[[example]]
+name = "receive_demo"
+required-features = ["receive"]

@@ -7,6 +7,7 @@ pub mod error;
 pub mod fountain;
 pub mod protocol;
 pub mod qr;
+pub mod receiver;
 pub mod snippet;
 pub mod transfer;
 

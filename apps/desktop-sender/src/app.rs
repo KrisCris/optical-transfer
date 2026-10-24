@@ -100,6 +100,15 @@ impl Preset {
     }
 }
 
+/// Which direction the window works in. Receive mode exists only in builds
+/// with the `receive` feature.
+#[cfg(feature = "receive")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Send,
+    Receive,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Files,
@@ -281,6 +290,12 @@ pub struct SenderApp {
     /// window's own controls also leaves the stage-only view.
     os_fullscreen: bool,
     pending_count: usize,
+    #[cfg(feature = "receive")]
+    mode: Mode,
+    /// Built on first use: listing cameras wakes AVFoundation, which a
+    /// session that only sends should not pay for.
+    #[cfg(feature = "receive")]
+    receive: Option<crate::receive::view::ReceiveView>,
 }
 
 impl Default for SenderApp {
@@ -305,7 +320,21 @@ impl SenderApp {
             fullscreen: false,
             os_fullscreen: false,
             pending_count: 0,
+            #[cfg(feature = "receive")]
+            mode: Mode::Send,
+            #[cfg(feature = "receive")]
+            receive: None,
         }
+    }
+
+    #[cfg(feature = "receive")]
+    fn receiving(&self) -> bool {
+        self.mode == Mode::Receive
+    }
+
+    #[cfg(not(feature = "receive"))]
+    fn receiving(&self) -> bool {
+        false
     }
 
     /// Start with files or folders already chosen, as passed on the command
@@ -527,7 +556,7 @@ impl SenderApp {
                 input.viewport().fullscreen,
             )
         });
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && !self.receiving() {
             self.add_paths(dropped);
         }
         if self.fullscreen {
@@ -584,6 +613,13 @@ impl eframe::App for SenderApp {
         }
 
         self.draw_top_bar(ui);
+        #[cfg(feature = "receive")]
+        if self.mode == Mode::Receive {
+            self.receive
+                .get_or_insert_with(crate::receive::view::ReceiveView::new)
+                .ui(ui);
+            return;
+        }
         egui::Panel::left("controls")
             .resizable(false)
             .exact_size(372.0)
@@ -644,17 +680,42 @@ impl SenderApp {
                             .size(theme::BODY + 1.0)
                             .strong(),
                     );
-                    ui.label(
-                        RichText::new("Sender")
-                            .size(theme::BODY + 1.0)
-                            .color(theme::TEXT_FAINT),
-                    );
+                    self.draw_mode_switch(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         theme::pill(ui, &format!("⚠ {SECURITY_WARNING}"), theme::WARN)
                             .on_hover_text(SECURITY_DETAIL);
                     });
                 });
             });
+    }
+
+    /// Send or Receive, locked while either direction has work running.
+    #[cfg(feature = "receive")]
+    fn draw_mode_switch(&mut self, ui: &mut egui::Ui) {
+        let locked = self.busy()
+            || self
+                .receive
+                .as_ref()
+                .is_some_and(crate::receive::view::ReceiveView::busy);
+        ui.add_space(8.0);
+        ui.add_enabled_ui(!locked, |ui| {
+            theme::segmented(
+                ui,
+                &mut self.mode,
+                &[(Mode::Send, "Send"), (Mode::Receive, "Receive")],
+            );
+        })
+        .response
+        .on_disabled_hover_text("Stop first to switch direction");
+    }
+
+    #[cfg(not(feature = "receive"))]
+    fn draw_mode_switch(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Sender")
+                .size(theme::BODY + 1.0)
+                .color(theme::TEXT_FAINT),
+        );
     }
 
     fn draw_controls(&mut self, ui: &mut egui::Ui) {
@@ -1258,7 +1319,7 @@ fn draw_drop_overlay(ctx: &egui::Context) {
     );
 }
 
-fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
+pub(crate) fn notice(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
         .fill(color.linear_multiply(0.1))
         .stroke(Stroke::new(1.0, color.linear_multiply(0.4)))
