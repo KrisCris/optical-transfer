@@ -113,7 +113,7 @@ the frame size and the distance is not information anyone can act on.
 | 8 | iPhone Safari web sender | another device's browser | multiple photos plus a file | defaults; save ZIP and compare extracted contents | not run |
 | 9 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary as case 2 | Fast (2953 B, 60 fps, 1 code) | not run |
 | 10 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Balanced and Max (2 and 4 codes) | not run |
-| 11 | any sender on a second screen | Mac web receiver using an iPhone as Continuity Camera | 1 MiB binary | Fast, then Max | not run |
+| 11 | web sender on a second screen | macOS desktop **Receive** mode, iPhone as Continuity Camera | 1 MiB binary | Fast, then Max | not run; see below |
 
 Case 5 has a software analogue that passes
 (`a_receiver_joining_mid_carousel_still_completes`); the hardware version also
@@ -122,6 +122,53 @@ exercises reacquisition, which the software one does not.
 Case 7 remains unverified on phone hardware. Desktop browser automation has
 verified an offline reload and a subsequent web-sender text transfer; that
 does not establish iPhone home-screen installation or airplane-mode behavior.
+
+## Case 11: the desktop receiver through Continuity Camera
+
+The native Receive mode, filming another screen through an iPhone that macOS
+offers as a camera. It has its own procedure because the receiver is the Mac:
+
+1. Package the app so the camera prompt names Optical Transfer rather than a
+   terminal, and so the Continuity Camera device type is enabled:
+
+   ```sh
+   ./scripts/build-web.sh
+   cargo build -p desktop-sender --release --features receive
+   python3 scripts/package_release.py --target aarch64-apple-darwin \
+     --binary target/release/desktop-sender
+   open "dist/aarch64-apple-darwin/Optical Transfer.app"
+   ```
+
+2. Mount the iPhone (locked, on a stand, same Apple Account, Wi-Fi and
+   Bluetooth on) facing the second screen. It should appear in the *Camera*
+   list as `… · Continuity`, and *Automatic* should name it.
+3. On the second screen, open the web app's *Send* page with the same
+   `optical-test-1MiB.bin` as case 2, choose *Fast*, start, and go full screen.
+4. In the desktop app, switch to *Receive* and press *Start receiving*. Allow
+   camera access the first time. Frame the codes so they fill most of the
+   preview; each code that decodes gets a coloured bracket, and the HUD shows
+   *locked* once every code is tracked.
+5. Save the file when it verifies, compare hashes, and copy *Elapsed*, the
+   *Avg / peak* rate and the rest of the Telemetry panel into the template. Repeat with
+   *Max* (4 codes).
+
+Record the camera line from Telemetry (it shows the negotiated size and frame
+rate): an iPhone's 60 fps formats are 1920×1440 and larger, which the app
+scales to 1280×960, so anything else there means the 60 fps request was
+refused.
+
+For reference only, not a hardware result: the same panel fed by a synthetic
+camera (`cargo run -p desktop-sender --release --features receive --example
+receive_demo`, which films a Max stream of a 1 MiB random file at 1280×960
+and 2.55 px per module, missing one frame in ten) received it in 2.0 s at
+524 KiB/s average, 618 KiB/s peak, with 57 capture fps and all four codes
+locked on an Apple Silicon Mac. A lens, a display and a hand will cost some of
+that; how much is what this case measures.
+
+| run | preset | elapsed | average | peak | camera | catch rate | dropped | sha256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Fast | | | | | | | |
+| 2 | Max | | | | | | | |
 
 ## Recording template
 

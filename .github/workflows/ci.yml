@@ -57,6 +57,16 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build -p desktop-sender --release
 
+      # Receive mode links AVFoundation and builds zxing-cpp from source, so it
+      # sits behind a feature the default build leaves off. The receive state
+      # machine, tracker and telemetry it shares are compiled and tested above
+      # on every platform; this covers the rest where it can run.
+      - name: Receive mode
+        if: runner.os == 'macOS'
+        run: |
+          cargo clippy -p desktop-sender --all-targets --features receive
+          cargo test -p desktop-sender --features receive
+
   web:
     name: web
     runs-on: ubuntu-latest

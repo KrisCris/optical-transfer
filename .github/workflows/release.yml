@@ -63,7 +63,14 @@ jobs:
           name: web
           path: web/app
 
-      - run: cargo build -p desktop-sender --release --target ${{ matrix.target }}
+      # Receive mode (camera capture and native QR decoding) is macOS-only so
+      # far; the other targets ship the sender alone.
+      - name: Build
+        shell: bash
+        run: |
+          features=""
+          [ "${{ runner.os }}" = macOS ] && features="--features receive"
+          cargo build -p desktop-sender --release --target ${{ matrix.target }} $features
 
       - name: Package
         shell: bash
