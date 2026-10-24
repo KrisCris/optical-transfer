@@ -140,6 +140,16 @@ pub fn looks_like_continuity(name: &str) -> bool {
         .any(|word| word.eq_ignore_ascii_case("iphone") || word.eq_ignore_ascii_case("ipad"))
 }
 
+/// A device name as the UI can draw it. Phone names are user-chosen, and
+/// "𝕊𝕒𝕞's iPhone" in mathematical letters renders as a row of empty boxes in
+/// the UI font; NFKC folds those letters to plain ones and leaves everything
+/// else, accents and CJK included, as it was.
+#[cfg(feature = "receive")]
+pub fn display_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    name.nfkc().collect()
+}
+
 #[cfg(all(feature = "receive", target_os = "macos"))]
 pub use macos::{Camera, cameras, open};
 
@@ -269,7 +279,7 @@ mod macos {
     }
 
     fn info(device: &AVCaptureDevice) -> CameraInfo {
-        let name = unsafe { device.localizedName() }.to_string();
+        let name = super::display_name(&unsafe { device.localizedName() }.to_string());
         // `isContinuityCamera` arrived in macOS 13; before that the name is
         // all there is to go on.
         let flagged = at_least(13, 0)
@@ -627,6 +637,14 @@ mod tests {
             choose_format(&[format(4096, 3072, 24.0)]).map(|choice| choice.index),
             Some(0)
         );
+    }
+
+    #[cfg(feature = "receive")]
+    #[test]
+    fn styled_device_names_fold_to_drawable_text() {
+        assert_eq!(display_name("𝕒𝕡𝕖𝕣𝕥𝕦𝕣𝕖 Camera"), "aperture Camera");
+        assert_eq!(display_name("𝕊ℍ𝟜𝔻𝟘𝕎 Camera"), "SH4D0W Camera");
+        assert_eq!(display_name("Zoë’s iPhone 相机"), "Zoë’s iPhone 相机");
     }
 
     #[test]

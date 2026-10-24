@@ -52,7 +52,10 @@ pub struct Core {
     pub verdict: Option<String>,
     /// The last stream that ended without verifying.
     pub failure: Option<String>,
+    /// The verified result, until the UI takes it.
     pub result: Option<Received>,
+    /// Latched at completion; taking `result` does not restart the session.
+    pub finished: bool,
     /// Session milliseconds of the last frame the receiver accepted.
     pub last_accepted: Option<f64>,
     /// The newest camera frame, for the viewfinder.
@@ -63,7 +66,7 @@ pub struct Core {
 
 impl Core {
     pub fn completed(&self) -> bool {
-        self.result.is_some()
+        self.finished
     }
 
     fn plan(&mut self, now: f64, frame: &Arc<LumaFrame>, pool: &DecodePool) -> Vec<Job> {
@@ -150,6 +153,7 @@ impl Core {
             } => {
                 self.accept(new_stream, stats, captured_at, now);
                 self.telemetry.completed(now);
+                self.finished = true;
                 self.result = Some(Received {
                     name,
                     media_type,
@@ -221,6 +225,7 @@ impl Session {
                 verdict: None,
                 failure: None,
                 result: None,
+                finished: false,
                 last_accepted: None,
                 preview: None,
                 preview_serial: 0,

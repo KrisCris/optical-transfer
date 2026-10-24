@@ -319,8 +319,19 @@ impl Telemetry {
         Snapshot {
             elapsed,
             done: self.end_at.is_some(),
+            // Recovered data over elapsed time: the whole payload once done,
+            // the solved blocks so far while running. (The web receiver
+            // divides the whole payload throughout, which overstates the
+            // average until the end.)
             average_kibs: match &stats {
-                Some(stats) if elapsed > 0.0 => stats.total_bytes as f64 / 1024.0 / elapsed,
+                Some(stats) if elapsed > 0.0 => {
+                    let bytes = if self.end_at.is_some() {
+                        stats.total_bytes
+                    } else {
+                        (stats.solved_blocks * stats.block_len).min(stats.total_bytes)
+                    };
+                    bytes as f64 / 1024.0 / elapsed
+                }
                 _ => 0.0,
             },
             catch_rate: stats

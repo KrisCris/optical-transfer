@@ -195,7 +195,9 @@ fn gunzip_bounded(bytes: &[u8], limit: usize) -> Result<Vec<u8>, OpticalError> {
     Ok(output)
 }
 
-pub(crate) fn safe_file_name(name: &str) -> String {
+/// The last path component of a name, without control characters. A name that
+/// arrived over the optical channel goes through this before it names a file.
+pub fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let cleaned: String = base
         .chars()

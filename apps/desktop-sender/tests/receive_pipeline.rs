@@ -17,9 +17,9 @@ use std::{
 };
 
 use desktop_sender::receive::{
-    camera::LumaFrame,
     decoder::Decoder,
     session::Session,
+    synthetic::{Framing, camera_frame},
     tracker::{Crop, Mode},
 };
 use optical_core::{
@@ -27,9 +27,6 @@ use optical_core::{
     receiver::{ReceiverEvent, ReceiverState},
     transfer::{Transfer, TransferSettings},
 };
-
-const DARK: f32 = 40.0;
-const LIGHT: f32 = 215.0;
 
 /// Deterministic incompressible bytes, so the stream has real work in it.
 fn noise(len: usize, mut seed: u64) -> Vec<u8> {
@@ -60,54 +57,14 @@ fn transfer(bytes: &[u8], codes: usize) -> Transfer {
     .unwrap()
 }
 
-/// Draw `codes` into a `width`×`height` luma frame, laid out `cols` wide,
-/// each centred in its cell at `pitch` pixels per module and turned by
-/// `degrees`. Every pixel averages four samples, so module edges blur the way
-/// a lens blurs them.
-fn camera_frame(
-    codes: &[QrFrame],
-    cols: usize,
-    width: usize,
-    height: usize,
-    pitch: f32,
-    degrees: f32,
-) -> LumaFrame {
-    let rows = codes.len().div_ceil(cols);
-    let (cell_w, cell_h) = (width / cols, height / rows);
-    let (sin, cos) = degrees.to_radians().sin_cos();
-    let mut pixels = vec![LIGHT as u8; width * height];
-    for (index, code) in codes.iter().enumerate() {
-        let (left, top) = ((index % cols) * cell_w, (index / cols) * cell_h);
-        let center = (
-            left as f32 + cell_w as f32 / 2.0,
-            top as f32 + cell_h as f32 / 2.0,
-        );
-        let half = code.size as f32 / 2.0;
-        let module = |dx: f32, dy: f32| {
-            let u = (cos * dx + sin * dy) / pitch + half;
-            let v = (-sin * dx + cos * dy) / pitch + half;
-            let dark = u >= 0.0
-                && v >= 0.0
-                && (u as usize) < code.size
-                && (v as usize) < code.size
-                && code.pixels[v as usize * code.size + u as usize];
-            if dark { DARK } else { LIGHT }
-        };
-        for y in top..top + cell_h {
-            for x in left..left + cell_w {
-                let (dx, dy) = (x as f32 + 0.5 - center.0, y as f32 + 0.5 - center.1);
-                let sum: f32 = [(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)]
-                    .iter()
-                    .map(|(ox, oy)| module(dx + ox, dy + oy))
-                    .sum();
-                pixels[y * width + x] = (sum / 4.0) as u8;
-            }
-        }
-    }
-    LumaFrame {
+fn framing(columns: usize, width: usize, height: usize, pitch: f32, degrees: f32) -> Framing {
+    Framing {
         width,
         height,
-        pixels,
+        columns,
+        pitch,
+        degrees,
+        offset: (0.0, 0.0),
     }
 }
 
@@ -127,7 +84,7 @@ fn rendered_frames_decode_through_zxing_into_a_verified_file() {
         if index % 5 == 4 {
             continue;
         }
-        let frame = camera_frame(&[code], 1, 640, 640, 3.1, 2.0);
+        let frame = camera_frame(&[code], framing(1, 640, 640, 3.1, 2.0));
         let whole = Crop {
             x: 0,
             y: 0,
@@ -171,7 +128,7 @@ fn a_crop_decodes_and_reports_bounds_in_frame_coordinates() {
     let mut transfer = transfer(&noise(8 * 1024, 3), 1);
     let payload = transfer.next_payload();
     let code = transfer.renderer().render(&payload).unwrap();
-    let frame = camera_frame(&[code], 1, 1280, 960, 4.0, 1.0);
+    let frame = camera_frame(&[code], framing(1, 1280, 960, 4.0, 1.0));
     let decoder = Decoder::new();
     let crop = Crop {
         x: 200,
@@ -206,7 +163,7 @@ fn a_session_locks_onto_a_grid_and_receives_the_file() {
         let codes: Vec<QrFrame> = (0..4)
             .map(|_| renderer.render(&transfer.next_payload()).unwrap())
             .collect();
-        let frame = camera_frame(&codes, 2, 1280, 960, 2.55, 0.8);
+        let frame = camera_frame(&codes, framing(2, 1280, 960, 2.55, 0.8));
         session.push(Arc::new(frame));
         thread::sleep(Duration::from_millis(16));
 
