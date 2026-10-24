@@ -74,6 +74,7 @@ fn main() -> eframe::Result<()> {
         id: "synthetic".to_owned(),
         name: "Synthetic camera".to_owned(),
         continuity: true,
+        built_in: false,
     }];
     let source = Arc::new(move |_: Option<&str>, sink| {
         let transfer =

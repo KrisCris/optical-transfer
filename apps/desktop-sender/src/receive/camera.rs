@@ -30,6 +30,8 @@ pub struct CameraInfo {
     pub name: String,
     /// An iPhone or iPad over Continuity Camera.
     pub continuity: bool,
+    /// Part of the Mac or its display, so it faces the person at the keyboard.
+    pub built_in: bool,
 }
 
 /// What the camera agreed to. Requested is not delivered: the capture rate in
@@ -126,12 +128,35 @@ pub fn choose_format(formats: &[FormatOption]) -> Option<FormatChoice> {
 
 /// The camera to open when the user has not picked one: a Continuity Camera
 /// if there is one — on a Mac the built-in camera faces the user, not the
-/// other screen — else the first camera.
+/// other screen — then any other real camera, then whatever there is. The
+/// same order as the web receiver's `pickDesktopCamera`.
 pub fn preferred(cameras: &[CameraInfo]) -> Option<&CameraInfo> {
     cameras
         .iter()
         .find(|camera| camera.continuity)
+        .or_else(|| {
+            cameras
+                .iter()
+                .find(|camera| !camera.built_in && !looks_virtual(&camera.name))
+        })
         .or_else(|| cameras.first())
+}
+
+/// Software cameras that re-broadcast something else rather than film.
+fn looks_virtual(name: &str) -> bool {
+    const VIRTUAL: [&str; 9] = [
+        "virtual",
+        "obs",
+        "snap camera",
+        "ndi",
+        "mmhmm",
+        "loom",
+        "zoom",
+        "teams",
+        "screen",
+    ];
+    let name = name.to_lowercase();
+    VIRTUAL.iter().any(|word| name.contains(word))
 }
 
 /// Names a phone camera reports when the OS cannot say so directly.
@@ -285,9 +310,12 @@ mod macos {
         let flagged = at_least(13, 0)
             && device.respondsToSelector(sel!(isContinuityCamera))
             && unsafe { device.isContinuityCamera() };
+        let built_in = unsafe { device.deviceType() }.to_string()
+            == "AVCaptureDeviceTypeBuiltInWideAngleCamera";
         CameraInfo {
             id: unsafe { device.uniqueID() }.to_string(),
             continuity: flagged || looks_like_continuity(&name),
+            built_in,
             name,
         }
     }
@@ -654,11 +682,13 @@ mod tests {
                 id: "built-in".into(),
                 name: "FaceTime HD Camera".into(),
                 continuity: false,
+                built_in: true,
             },
             CameraInfo {
                 id: "phone".into(),
                 name: "Sam's iPhone Camera".into(),
                 continuity: true,
+                built_in: false,
             },
         ];
         assert_eq!(
@@ -673,5 +703,29 @@ mod tests {
         assert!(looks_like_continuity("iPad (2) Camera"));
         assert!(!looks_like_continuity("Logitech BRIO"));
         assert!(!looks_like_continuity("iPhoneography Cam"));
+    }
+
+    #[test]
+    fn without_a_flagged_phone_an_external_camera_beats_the_built_in_one() {
+        let camera = |id: &str, name: &str, built_in| CameraInfo {
+            id: id.into(),
+            name: name.into(),
+            continuity: false,
+            built_in,
+        };
+        let cameras = [
+            camera("built-in", "FaceTime HD Camera", true),
+            camera("obs", "OBS Virtual Camera", false),
+            camera("phone", "SH4D0W Camera", false),
+        ];
+        assert_eq!(
+            preferred(&cameras).map(|camera| camera.id.as_str()),
+            Some("phone")
+        );
+        assert_eq!(
+            preferred(&cameras[..2]).map(|camera| camera.id.as_str()),
+            Some("built-in"),
+            "a virtual camera is never preferred over a real one"
+        );
     }
 }

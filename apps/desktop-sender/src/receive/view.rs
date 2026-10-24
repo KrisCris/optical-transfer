@@ -194,6 +194,11 @@ impl ReceiveView {
 
     fn start(&mut self) {
         self.error = None;
+        // A phone often joins after the window opened. Automatic should find
+        // it without a trip to Refresh.
+        if self.system && self.chosen.is_none() {
+            self.cameras = camera::cameras();
+        }
         let chosen = self
             .chosen
             .clone()
