@@ -6,6 +6,14 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["scripts/serve-web.py", "--directory", "web/app", "--port", "8765"],
       "port": 8765
+    },
+    {
+      "name": "web-https",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scripts/serve-web.py", "--directory", "web/app", "--port", "8443",
+        "--cert", ".tooling/dev-cert.pem", "--key", ".tooling/dev-key.pem"],
+      "port": 8443,
+      "url": "https://localhost:8443"
     }
   ]
 }

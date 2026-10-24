@@ -177,7 +177,11 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 
 /* --------------------------------------------------------- settings popover */
 
-.popover { position: relative; }
+/* Anchored to the whole actions row, not the button: once Start gives way to
+   the narrow Stop, the button sits at the far left and a popover hung off it
+   would run past the window's edge. */
+.actions:has(> .popover) { position: relative; }
+.popover { position: static; }
 .popover summary { list-style: none; }
 .popover summary::-webkit-details-marker { display: none; }
 .popover-body {

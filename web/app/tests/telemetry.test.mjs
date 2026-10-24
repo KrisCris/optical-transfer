@@ -6,7 +6,8 @@ const near = (actual, expected, tolerance = 1e-6) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} is not ${expected}`);
 
 const stats = (overrides = {}) => ({
-  totalBlocks: 100, blockLen: 1024, totalBytes: 102400, uniqueFrames: 12, seqSpan: 15, ...overrides,
+  totalBlocks: 100, blockLen: 1024, totalBytes: 102400, uniqueFrames: 12, solvedBlocks: 10, seqSpan: 15,
+  ...overrides,
 });
 
 /** Eleven useful frames, 100 ms apart, from a capture at t = 50. */
@@ -35,7 +36,13 @@ test("live rate, ETA, catch rate and overhead come from useful frames only", () 
   near(snap.liveKiBs, usefulPerSecond);
   near(snap.eta, (100 - 11) / usefulPerSecond);
   near(snap.catchRate, 12 / 15);
-  near(snap.overhead, 12 / 100);
+  near(snap.overhead, 12 / 10);
+});
+
+test("mid-transfer average and overhead count recovered blocks, not the payload", () => {
+  const snap = streaming().snapshot(1100);
+  near(snap.averageKiBs, 10 / 1.05, 1e-9);
+  assert.equal(new Telemetry().snapshot(0).overhead, null);
 });
 
 test("a stall drops the live rate to zero and withdraws the ETA", () => {
@@ -55,6 +62,7 @@ test("completion freezes elapsed time and the history", () => {
   assert.equal(later.liveKiBs, 0);
   assert.equal(later.eta, null);
   near(later.averageKiBs, 100 / 1.15);
+  near(later.overhead, 1);
   assert.deepEqual(telemetry.series(9000), telemetry.series(1200));
 });
 

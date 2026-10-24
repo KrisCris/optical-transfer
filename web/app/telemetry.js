@@ -188,18 +188,25 @@ export class Telemetry {
       eta = Math.max(1, stats.totalBlocks - this.usefulFrames) / usefulRate;
     }
 
+    // Recovered so far, not the payload's size: until the end only solved
+    // blocks count, and the last block may be short.
+    const done = this.endAt !== null;
+    const solved = done ? stats?.totalBlocks ?? 0 : stats?.solvedBlocks ?? 0;
+    const recovered = done ? stats?.totalBytes ?? 0 : Math.min(stats?.totalBytes ?? 0, solved * blockLen);
+
     const workers = this.workers ?? 1;
     return {
       elapsed,
-      done: this.endAt !== null,
+      done,
       stats,
       usefulFrames: this.usefulFrames,
       liveKiBs,
-      averageKiBs: elapsed > 0 && stats ? stats.totalBytes / 1024 / elapsed : 0,
+      averageKiBs: elapsed > 0 ? recovered / 1024 / elapsed : 0,
       peakKiBs: this.peakKiBs,
       eta,
       catchRate: stats?.seqSpan ? stats.uniqueFrames / stats.seqSpan : null,
-      overhead: stats?.totalBlocks ? stats.uniqueFrames / stats.totalBlocks : null,
+      // Frames taken per block recovered; 1.0 is a perfect fountain.
+      overhead: solved ? stats.uniqueFrames / solved : null,
       captureFps: perSecond(this.captures),
       decodeFps: perSecond(this.decodes),
       symbolFps: perSecond(this.symbols),

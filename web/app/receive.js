@@ -11,6 +11,7 @@ import { CaptureLoop, DecodePool, RegionTracker } from "./capture.js";
 import { Telemetry, HISTORY_BUCKETS } from "./telemetry.js";
 import { BlockMap, drawBrackets, drawThroughput } from "./charts.js";
 import { formatBytes, formatDuration, formatRate } from "./format.js";
+import { pickDesktopCamera } from "./cameras.js";
 
 // WasmReceiver.addFrame outcome codes; see crates/optical-wasm/src/lib.rs.
 const PROGRESS = 1;
@@ -81,10 +82,6 @@ document.addEventListener("click", (event) => {
   if (els.settings.open && !els.settings.contains(event.target)) els.settings.open = false;
 });
 
-// A phone or tablet on the same Apple Account shows up on a Mac as an
-// ordinary camera ("…'s iPhone Camera"). On a desktop it is almost always the
-// camera a user wants to aim at another screen: the built-in one faces them.
-const CONTINUITY = /\b(iPhone|iPad)\b/i;
 const MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
   (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 const CAMERA_KEY = "optical-transfer.camera";
@@ -105,12 +102,17 @@ async function listCameras() {
   }
 }
 
+const AUTOMATIC = MOBILE ? "Rear (automatic)" : "Automatic";
+els.camera.options[0].text = AUTOMATIC;
+
+/** Lists every camera the browser will name. Before permission is granted
+ *  browsers hide names and ids, so the list fills in after the first start. */
 async function populateCameras() {
-  const cameras = await listCameras();
-  if (cameras.length < 2) return;
+  const cameras = (await listCameras()).filter((device) => device.deviceId);
+  if (!cameras.length) return;
   const chosen = els.camera.value || rememberedCamera();
   els.camera.replaceChildren(
-    new Option(MOBILE ? "Rear (automatic)" : "Automatic", ""),
+    new Option(AUTOMATIC, ""),
     ...cameras.map((device, index) => new Option(device.label || `Camera ${index + 1}`, device.deviceId)),
   );
   els.camera.value = cameras.some((device) => device.deviceId === chosen) ? chosen : "";
@@ -134,8 +136,24 @@ async function preferredCamera() {
   const remembered = rememberedCamera();
   const cameras = await listCameras();
   if (remembered && cameras.some((device) => device.deviceId === remembered)) return remembered;
-  return cameras.find((device) => CONTINUITY.test(device.label))?.deviceId ?? "";
+  return pickDesktopCamera(cameras);
 }
+
+// A Continuity Camera appears only once the phone is near, locked and still,
+// which is often after the receiver has started. Refresh the list, and on
+// Automatic move to the phone as soon as it shows up; the transfer so far is
+// kept, since only the camera is reopened.
+void populateCameras();
+navigator.mediaDevices?.addEventListener?.("devicechange", async () => {
+  await populateCameras();
+  if (!running) return;
+  // The camera in use went away (the phone was picked up or walked off).
+  if (stream?.getVideoTracks()[0]?.readyState === "ended") return void restartCamera();
+  if (els.camera.value) return;
+  const wanted = await preferredCamera();
+  const current = stream?.getVideoTracks()[0]?.getSettings?.().deviceId;
+  if (wanted && wanted !== current) void restartCamera();
+});
 
 // ------------------------------------------------------------------ camera
 
