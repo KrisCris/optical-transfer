@@ -116,6 +116,7 @@ h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 .tag[data-tone="done"] { color: var(--accent-ink); background: var(--accent); }
 
 .footnote { max-width: 1180px; margin: 8px auto 32px; padding: 0 24px; font-size: 12px; color: var(--faint); text-align: center; }
+.footnote a { color: var(--dim); }
 
 /* ---------------------------------------------------------------- buttons */
 

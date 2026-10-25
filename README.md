@@ -5,11 +5,19 @@ camera and a screen. No network, no pairing, no account. The sender plays the
 payload as an endless stream of animated QR codes; the receiving device points
 its camera at it and rebuilds the file.
 
-A Rust port of [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
-v0.5.3. Its receivers read upstream's wire format (v3). Its senders default
-to a faster format of their own, v4, which uses RaptorQ coding and can add
-colour codes. Switched to v3, either sender works with upstream's receiver.
-[docs/wire-v4.md](docs/wire-v4.md) specifies v4.
+**Use it in a browser:** <https://kriscris.github.io/optical-transfer/>. Open
+it on both devices, choose *Send* on one and *Receive* on the other. It
+installs to the home screen and then works with no network at all. Native
+desktop apps for Windows, macOS and Linux, on x86-64 and arm64, are built by
+CI on every push, and tagged versions are attached to
+[Releases](https://github.com/KrisCris/optical-transfer/releases).
+
+It speaks its own wire format, v4: RaptorQ fountain coding behind a 16-byte
+frame header, files up to 128 MiB, and optional colour codes that carry three
+QR codes in one. [docs/wire-v4.md](docs/wire-v4.md) specifies it. Every
+receiver also reads wire v3, the format of
+[Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer),
+and either sender can still send v3 for a receiver that knows nothing newer.
 
 ## Security
 
@@ -32,7 +40,7 @@ generated ZIPs are validated and sanitized before sending.
 | `apps/desktop-sender` | The native app, an `eframe` window. Sends everywhere; receives through a camera on macOS (the `receive` feature). |
 | `web/app` | The offline Send/Receive PWA. |
 | `vendor/decimen-codec` | The pinned zxing-cpp QR decoder build, checksummed. |
-| `scripts/upstream-conformance` | Cross-implementation checks against the upstream baseline. |
+| `scripts/upstream-conformance` | Wire v3 checked against Decimen's own implementation, running. |
 | `docs` | Design notes: `wire-v4.md` covers the v4 format and colour codes. |
 
 The two ends share nothing but the frames. There is no handshake and no back
@@ -74,7 +82,7 @@ camera (see [docs/wire-v4.md](docs/wire-v4.md)).
 
 *Fine-tune* sets each value directly. That includes the error-correction
 level, 120 fps for a display that refreshes at least that fast, colour, and
-the wire format: v4, or v3 for a receiver running upstream Decimen, which
+the wire format: v4, or v3 for a receiver running Decimen, which
 reads neither v4 nor colour. A code never changes twice within one refresh, so
 on a slower display the stream runs at the refresh rate and the sender's
 Display line says so.
@@ -106,8 +114,10 @@ and a finished file is offered for saving. Run from `cargo run` the binary is
 not an app bundle, so macOS attributes the camera to the terminal that started
 it; the packaged `.app` asks for itself.
 
-**Web app.** Serve `web/app/` and open it on both devices. Browsers grant the
-camera only to a secure page; `localhost` qualifies, but a phone needs HTTPS:
+**Web app.** The hosted copy at <https://kriscris.github.io/optical-transfer/>
+is rebuilt from `main` on every push. To run your own, serve `web/app/` and
+open it on both devices. Browsers grant the camera only to a secure page;
+`localhost` qualifies, but a phone needs HTTPS:
 
 ```sh
 mkdir -p .tooling
@@ -244,10 +254,10 @@ node scripts/loopback-bench.mjs --runs "codes=1&fps=60&color=1&chroma=1" --size 
 
 ## Limits
 
-- Files up to 128 MiB on wire v4 and 64 MiB on v3 (upstream's limit); text
+- Files up to 128 MiB on wire v4 and 64 MiB on v3 (Decimen's limit); text
   snippets up to 4 MiB. The v4 limit is a memory budget for the receiving
   browser tab, which holds about four times the file at the end. It has not
-  been tried on a phone. Upstream's 64 MiB limits the packed container, so on
+  been tried on a phone. Decimen's 64 MiB limits the packed container, so on
   v3 a file that does not compress and is within a few hundred bytes of
   64 MiB is refused, with a message suggesting v4.
 - Up to 256 files per selection. Multiple files share the limit, including
@@ -258,13 +268,14 @@ node scripts/loopback-bench.mjs --runs "codes=1&fps=60&color=1&chroma=1" --size 
   works. v4 has no such ceiling.
 - The desktop app receives on macOS only. Windows and Linux builds send, and
   receiving there is the web app's job.
-- The first release targets Windows x86-64, Linux x86-64, macOS x86-64, macOS
-  arm64, and modern iOS and Android browsers.
+- Desktop builds target Windows, macOS and Linux on x86-64 and arm64. The
+  arm64 Windows and Linux builds are compiled and packaged in CI but have not
+  been run on hardware. The web app targets modern iOS and Android browsers.
 
 ## What is verified
 
-Wire v3 is pinned against upstream's own golden vectors, and
-`scripts/upstream-conformance/` checks both directions against the upstream
+Wire v3 is pinned against Decimen's own golden vectors, and
+`scripts/upstream-conformance/` checks both directions against the Decimen
 implementation *running*. That includes checking that `flate2` and the
 browser's `CompressionStream` can read each other's gzip.
 `crates/optical-core/tests/wire_v4.rs` pins v4. It covers the block layout,
@@ -291,10 +302,14 @@ verification. The rebuilt receiver and multi-code senders have not yet been
 measured on a real camera; `tests/end-to-end/README.md` lists the runs still
 outstanding.
 
-## License and attribution
+## Origins and license
 
-AGPL-3.0-or-later, as a derivative of Decimen Optical Transfer v0.5.3
-(commit `5301fc2020716b5a97d4edf6e1793c3dedbf6e17`). See `LICENSE` and
-`NOTICE.md` for the full attribution and the zxing-cpp Apache-2.0 notice.
-Distributed archives carry both, plus a `SOURCE.txt` naming the commit they
-were built from.
+This project began as a Rust port of Decimen Optical Transfer v0.5.3 (commit
+`5301fc2020716b5a97d4edf6e1793c3dedbf6e17`), by Evan Crawley. Its own wire
+format, receiver pipeline and apps have since gone their own way, but it
+remains a derivative work, licensed AGPL-3.0-or-later like the original. See
+`LICENSE`, and `NOTICE.md` for the full attribution and the Apache-2.0
+notices for zxing-cpp and RaptorQ. Distributed archives carry both, plus a
+`SOURCE.txt` naming the commit they were built from. The hosted web app links
+to this source from its footer, as the AGPL asks of software offered over a
+network.

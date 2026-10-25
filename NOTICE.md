@@ -1,7 +1,7 @@
 # Notices
 
-This project is a Rust port of Decimen Optical Transfer v0.5.3, pinned at
-commit `5301fc2020716b5a97d4edf6e1793c3dedbf6e17`, from
+This project began as a Rust port of Decimen Optical Transfer v0.5.3, pinned
+at commit `5301fc2020716b5a97d4edf6e1793c3dedbf6e17`, from
 https://github.com/bashalarmistalt/decimen-optical-transfer.
 
 Decimen Optical Transfer is Copyright (c) 2026 Evan Crawley (Bash Alarmist)
@@ -22,3 +22,7 @@ carries that license as `web/vendor/decimen-codec/LICENSE.zxing-cpp`.
 
 Portions contributed upstream by Steve Dakh are incorporated under their MIT
 License terms; see the pinned upstream NOTICE for the full attribution.
+
+Wire v4's fountain code is the `raptorq` crate 2.0.1
+(https://github.com/cberner/raptorq), licensed under the Apache License,
+Version 2.0, and compiled into every build unmodified.

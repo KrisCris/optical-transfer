@@ -93,6 +93,9 @@ def check_precache(failures: list[str]) -> list[str]:
 def check_local_references(failures: list[str], assets: list[str]) -> None:
     """Every script/style/manifest/icon the HTML pulls in must be precached."""
     html = (RECEIVER / "index.html").read_text()
+    # A link the user follows (the footer's source link) is navigation, not a
+    # fetch: the app loads and works offline without it, so it is exempt.
+    html = re.sub(r"(<a\b[^>]*?)\bhref=[\"']https://[^\"']+[\"']", r"\1", html)
     referenced = set(re.findall(r"(?:src|href)=[\"']([^\"']+)[\"']", html))
     precached = {asset.removeprefix("./") for asset in assets}
     for reference in referenced:

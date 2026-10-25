@@ -1,0 +1,63 @@
+name: Pages
+
+# The hosted web app at https://kriscris.github.io/optical-transfer/, rebuilt
+# from main on every push. Pages gives it the HTTPS a phone needs before it
+# will open a camera, with no certificate to make or trust.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push replaces a queued one, but a
+# deployment already under way is allowed to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pages
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+
+      # Builds the wasm, copies the vendored decoder in and runs the static
+      # checks, so a site that would reach the network never deploys.
+      - run: ./scripts/build-web.sh
+
+      # The same files a release archive carries: the test harness stays out
+      # of the service worker's scope.
+      - name: Stage the site
+        run: rsync -a --exclude tests --exclude .gitignore --exclude '*.map' web/app/ _site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
