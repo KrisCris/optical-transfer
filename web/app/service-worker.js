@@ -10,7 +10,7 @@
 // served stale across versions, and nothing revalidates over a network that
 // may not exist.
 
-const VERSION = "optical-transfer-v15";
+const VERSION = "optical-transfer-v16";
 
 // Every file the receiver needs to reach its camera-ready screen. Checked
 // against the served tree by scripts/check-web.py, so a new asset that is not
@@ -33,6 +33,10 @@ const ASSETS = [
   "./send-worker.js",
   "./manifest.webmanifest",
   "./icons/icon.svg",
+  "./icons/apple-touch-icon.png",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png",
+  "./icons/icon-maskable-512.png",
   "./pkg/optical_wasm.js",
   "./pkg/optical_wasm_bg.wasm",
   "./vendor/decimen-codec/decimen_codec.js",
