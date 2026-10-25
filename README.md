@@ -6,8 +6,10 @@ payload as an endless stream of animated QR codes; the receiving device points
 its camera at it and rebuilds the file.
 
 A Rust port of [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
-v0.5.3, byte-compatible with it on the wire: either sender works with either
-receiver.
+v0.5.3. Its receivers read upstream's wire format (v3). Its senders default
+to a faster format of their own, v4, which uses RaptorQ coding and can add
+colour codes. Switched to v3, either sender works with upstream's receiver.
+[docs/wire-v4.md](docs/wire-v4.md) specifies v4.
 
 ## Security
 
@@ -25,16 +27,17 @@ generated ZIPs are validated and sanitized before sending.
 
 | Path | What it is |
 | --- | --- |
-| `crates/optical-core` | Protocol, fountain code, containers, ZIP bundling, transfer and QR renderer. Platform-neutral, no I/O. |
+| `crates/optical-core` | Both wire formats, both fountain codes (LT and RaptorQ), containers, ZIP bundling, transfer and QR renderer. Platform-neutral, no I/O. |
 | `crates/optical-wasm` | Sender and receiver state plus `wasm-bindgen` wrappers. |
 | `apps/desktop-sender` | The native app, an `eframe` window. Sends everywhere; receives through a camera on macOS (the `receive` feature). |
 | `web/app` | The offline Send/Receive PWA. |
 | `vendor/decimen-codec` | The pinned zxing-cpp QR decoder build, checksummed. |
 | `scripts/upstream-conformance` | Cross-implementation checks against the upstream baseline. |
+| `docs` | Design notes: `wire-v4.md` covers the v4 format and colour codes. |
 
-Both ends speak only the shared wire format. There is no handshake and no back
+The two ends share nothing but the frames. There is no handshake and no back
 channel: a receiver locking onto a stream halfway through rebuilds the file
-from wherever it started.
+from wherever it started, and tells the wire versions apart frame by frame.
 
 ## Build
 
@@ -45,8 +48,8 @@ benchmark. On Linux the desktop sender also needs the GTK, X11/Wayland and GL
 development headers; `.github/workflows/ci.yml` has the exact package list.
 
 ```sh
-cargo test --workspace                 # protocol, fountain, both ends
-node --test web/app/tests/*.test.mjs   # capture scheduler, telemetry, flip clock
+cargo test --workspace                 # both wires, both fountains, both ends
+node --test web/app/tests/*.test.mjs   # capture scheduler, telemetry, flip clock, colour unmixing
 ./scripts/build-web.sh                 # wasm, vendor and static checks
 cargo run -p desktop-sender --release  # or: … -- report.pdf photos/
 cargo run -p desktop-sender --release --features receive  # macOS, adds Receive
@@ -54,24 +57,33 @@ cargo run -p desktop-sender --release --features receive  # macOS, adds Receive
 
 ## Using it
 
-**Speed presets.** Both senders offer the same four, and *Fast* is the
+**Speed presets.** Both senders offer the same five, and *Fast* is the
 default:
 
-| Preset | Codes on screen | Frames/s | Bytes per code | On the wire |
+| Preset | Codes on screen | Frames/s | Bytes per code | On the wire (v4) |
 | --- | --- | --- | --- | --- |
 | Reliable | 1 | 24 | 1465 | 34 KiB/s |
-| Balanced | 2 | 30 | 2331 | 135 KiB/s |
+| Balanced | 2 | 30 | 2331 | 136 KiB/s |
 | Fast | 1 | 60 | 2953 | 172 KiB/s |
-| Max | 4 | 60 | 2953 | 687 KiB/s |
+| Colour | 1, ×3 layers | 60 | 2953 | 516 KiB/s |
+| Max | 4 | 60 | 2953 | 688 KiB/s |
 
-*Fine-tune* sets each value directly, including the error-correction level
-and 120 fps for a display that refreshes at least that fast. A code never
-changes twice within one refresh, so on a slower display the stream runs at
-the refresh rate and the sender's Display line says so.
-Frame rate and code count change a running stream in place. Bytes per code and
-ECC are baked into every frame, so changing them restarts the stream with a
-new session. A payload smaller than one full code is sent at its own size, so
-a short text rides a small, coarse code instead of a padded version 40.
+*Colour* puts three codes in one, in the red, green and blue channels. It only
+pays while the code fills most of the camera's view, and has yet to meet a real
+camera (see [docs/wire-v4.md](docs/wire-v4.md)).
+
+*Fine-tune* sets each value directly. That includes the error-correction
+level, 120 fps for a display that refreshes at least that fast, colour, and
+the wire format: v4, or v3 for a receiver running upstream Decimen, which
+reads neither v4 nor colour. A code never changes twice within one refresh, so
+on a slower display the stream runs at the refresh rate and the sender's
+Display line says so.
+Frame rate and code count change a running stream in place. Bytes per code,
+ECC, wire format and colour change what each frame looks like, so changing
+any of them restarts the stream. A v4 receiver keeps what it already has
+across a restart that leaves the bytes per code alone. A payload smaller than
+one full code is sent at its own size, so a short text rides a small, coarse
+code instead of a padded version 40.
 
 **Desktop sender.** Drop files or folders on the window, choose them with the
 picker, pass them on the command line, or switch to *Text*. Press *Start
@@ -126,12 +138,14 @@ and decode worker count, and the choice of camera is remembered.
 
 **What the receiver shows.** The transfer card has recovered percent, current
 rate, time remaining and elapsed time. Under them sit a one-minute chart of
-recovered data rate and a map with one pixel per source block, lit as each
-block is solved. Telemetry splits into the stream:
+recovered data rate and a map with one pixel per source block (per source
+symbol on v4), lit as each is recovered. Telemetry splits into the stream:
 
 - payload and block dimensions
+- the format: wire version, and colour while colour codes are arriving
 - unique, duplicate and redundant frames
-- equations parked for the solver, and eliminations run
+- on v3, equations parked for the solver and eliminations run; on v4, repair
+  symbols held and decode attempts
 - catch rate (frames read over frames sent)
 - overhead (frames used per source block)
 - average and peak rate
@@ -149,16 +163,19 @@ and the pipeline:
 Elapsed time starts at the capture that produced the first accepted frame, so
 aiming is not counted. Use an incompressible file when comparing speeds.
 
-**What the sender shows.** The position in the carousel (systematic sweep or
-repair frames), payload and compression, QR version, block count and size,
-the raw rate and the best case for one clean sweep. It also shows frames
-shown, the flip rate measured against its target, and the display's refresh
-rate. A window that stalls (hidden, occluded or throttled) says so, because a
+**What the sender shows.** The wire format and the stream's id. Then where the
+stream is: on v4 the systematic sweep and then a count of repair symbols,
+which never repeat; on v3 the position in the carousel. Payload and
+compression, QR version, source count and size, the raw rate and the best
+case for one clean sweep. It also shows frames shown, the flip rate measured
+against its target, and the display's refresh rate. A window that stalls (hidden, occluded or throttled) says so, because a
 frozen stream otherwise looks like a receiver failure.
 
 **If it is not picking anything up.** Fill about half the camera view with the
 code, hold still, turn the sending screen's brightness up, and step down a
-preset. Fewer, larger, slower codes beat dense fast ones.
+preset. Fewer, larger, slower codes beat dense fast ones. *Colour* needs the
+code to fill most of the view; if the receiver's Format line never says
+colour, use *Max* instead.
 
 ## How it is fast
 
@@ -175,42 +192,70 @@ preset. Fewer, larger, slower codes beat dense fast ones.
   with a code missing and 1500 ms when locked, and a due scan takes one worker
   instead of the whole frame. A busy pool drops the frame instead of queueing
   a stale one. The main thread does no per-frame DOM work.
-- **Decoder.** The LT peeling decoder finishes with Gaussian elimination once
-  the parked equations reach full rank. At heavy loss that completes inside
-  the first repair half of the carousel (under 1.2× overhead at 40–75% loss in
-  the fountain tests) instead of waiting for peeling to get lucky.
+- **Coding.** Wire v4 codes with RaptorQ. A source block decodes from about
+  as many symbols as it has, whichever ones arrived, so a receiver needs one
+  frame per source symbol however many it missed. Repair symbols never repeat,
+  so however long a receiver watches, every frame it catches is new. v3's LT
+  decoder finishes with Gaussian elimination once the parked equations reach
+  full rank, but in the benchmark below it needed up to 1.59 frames per block
+  at 1 MiB and up to 1.99 at 16 MiB.
+- **Colour.** A colour code carries three frames. The receiver unmixes the
+  camera's channels blind, from the code's own colour statistics, and reads
+  each channel as an ordinary QR code.
 
 `scripts/loopback-bench.mjs` measures the receive pipeline end to end in
 headless Chrome. The browser sender's own display is re-filmed by a simulated
 1280×960 camera with blur, tilt and contrast loss, and fed through the real
-capture and decode path. There is no lens, glare or rolling shutter, so this
-measures scheduling and decoding. Here is a 1 MiB incompressible file at 2953
-bytes per code and 60 fps, compared against a replay of this repository's
-previous receiver scheduler:
+capture and decode path. With `chroma=1` the camera also mixes its colour
+channels, keeps colour at 4:2:0 and adds noise, which is what colour codes
+have to survive. There is no lens, glare or rolling shutter, so this measures
+coding, scheduling and decoding.
 
-| Receiver | Codes | Time | Average | Catch rate | Overhead |
-| --- | --- | --- | --- | --- | --- |
-| previous | 1 | 14.1 s | 73 KiB/s | 0.89 | 1.30 |
-| current | 1 | 6.4–7.9 s | 130–160 KiB/s | 0.89–0.99 | 1.06–1.18 |
-| previous | 4 | 7.7 s | 133 KiB/s | 0.28 | 1.42 |
-| current | 4 | 1.6–2.1 s | 494–644 KiB/s | 0.75–0.98 | 1.03–1.15 |
+Here is an incompressible file at 2953 bytes per code and 60 fps. *Before*
+is this repository just before v4 (wire v3 only), built separately and run on
+the same page, interleaved with the current build. Times and rates are
+medians, with the run-to-run range of frames needed per source block:
 
-Ranges are across repeated runs on one machine; the ceiling at four codes is
-the 687 KiB/s on the wire.
+| File | Codes | Before (v3) | Now (v4) | Frames per block, v3 → v4 |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 1 | 6.9 s, 148 KiB/s | 6.1 s, 168 KiB/s | 1.02–1.59 → 1.00 |
+| 1 MiB | 1, colour | — | 2.1 s, 489 KiB/s | 1.00 |
+| 1 MiB | 4 | 2.0 s, 518 KiB/s | 1.7 s, 601 KiB/s | 1.01–1.32 → 1.00 |
+| 5 MiB | 1 | 44.2 s, 117 KiB/s | 33.1 s, 155 KiB/s | 1.30–1.41 → 1.00 |
+| 16 MiB | 4 | 33.0 s, 497 KiB/s | 24.5 s, 668 KiB/s | 1.31–1.33 → 1.00 |
+
+The wire carries 172 KiB/s at one code, 516 in colour and 688 at four. v4
+runs within a few percent of that whenever the camera catches every frame,
+97% of it at 16 MiB. v3 loses the difference to overhead, which grows with
+the file and with loss. A transfer at four codes is mostly spent locking onto
+the codes at 1 MiB, so the larger files show the difference better. These
+are runs on an 8-core Apple Silicon Mac that other work was also using. The
+1 and 5 MiB rows count runs whose page captured at 50 fps or more. The
+16 MiB row is the two runs of each that caught at least 95% of frames. In the
+rest, v3 needed up to 1.99 frames per block and v4 stayed at 1.00.
+[docs/wire-v4.md](docs/wire-v4.md) has the run counts and ranges, every
+larger run, and the checks that tell the wire's effect from the machine's.
 
 ```sh
 python3 scripts/serve-web.py --directory web/app --port 8765 &
-node scripts/loopback-bench.mjs --runs "codes=4&fps=60" --repeat 3
+node scripts/loopback-bench.mjs --runs "codes=4&fps=60" "codes=4&fps=60&wire=3" --repeat 3
+node scripts/loopback-bench.mjs --runs "codes=1&fps=60&color=1&chroma=1" --size 5242880
 ```
 
 ## Limits
 
-- Files up to 64 MiB; text snippets up to 4 MiB.
-- Up to 256 files per selection. Multiple files share the 64 MiB limit,
-  including ZIP headers. ZIP entries are stored uncompressed.
-- A frame numbers its source blocks in 16 bits, so small frame sizes cap out
-  well below the file limit — about 30 MB at 500 bytes per code. The sender
-  refuses before starting and names a setting from its own list that works.
+- Files up to 128 MiB on wire v4 and 64 MiB on v3 (upstream's limit); text
+  snippets up to 4 MiB. The v4 limit is a memory budget for the receiving
+  browser tab, which holds about four times the file at the end. It has not
+  been tried on a phone. Upstream's 64 MiB limits the packed container, so on
+  v3 a file that does not compress and is within a few hundred bytes of
+  64 MiB is refused, with a message suggesting v4.
+- Up to 256 files per selection. Multiple files share the limit, including
+  ZIP headers. ZIP entries are stored uncompressed.
+- A v3 frame numbers its source blocks in 16 bits, so small frame sizes cap
+  out well below the file limit, at about 30 MB at 500 bytes per code. The
+  sender refuses before starting and names a setting from its own list that
+  works. v4 has no such ceiling.
 - The desktop app receives on macOS only. Windows and Linux builds send, and
   receiving there is the web app's job.
 - The first release targets Windows x86-64, Linux x86-64, macOS x86-64, macOS
@@ -218,10 +263,21 @@ node scripts/loopback-bench.mjs --runs "codes=4&fps=60" --repeat 3
 
 ## What is verified
 
-The wire format is pinned against upstream's own golden vectors, and
+Wire v3 is pinned against upstream's own golden vectors, and
 `scripts/upstream-conformance/` checks both directions against the upstream
 implementation *running*. That includes checking that `flate2` and the
-browser's `CompressionStream` can read each other's gzip. In the browser:
+browser's `CompressionStream` can read each other's gzip.
+`crates/optical-core/tests/wire_v4.rs` pins v4. It covers the block layout,
+decoding from about `K` symbols at 5–90% loss and from repair symbols alone,
+interleaved blocks, refusing hostile headers, a layout for the largest
+container a permitted file packs into, and receivers following a sender that
+switches wire. Every offered frame size and ECC level, and a receiver
+joining mid-stream, are run end to end over both wires.
+Colour codes are checked end to end through two synthetic cameras with 4:2:0
+chroma and crosstalk: the desktop receiver's tests and the loopback
+benchmark. The web worker's unmixing has its own tests in
+`web/app/tests/unmix.test.mjs`.
+In the browser:
 
 - `web/app/tests/optical-loop.html` takes sender-drawn QR modules through the
   shipped zxing-cpp build into the Rust receiver, over a lossy stream and for

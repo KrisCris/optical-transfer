@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use desktop_sender::stream::{FlipClock, FrameSource, best_grid};
+use eframe::egui::Color32;
 use optical_core::transfer::{Transfer, TransferSettings};
 
 /// Tick `clock` at `hz` for `seconds`, with an endless supply of frames.
@@ -127,8 +128,10 @@ fn the_grid_follows_the_window() {
 fn the_worker_streams_real_frames_in_order_and_stops_when_dropped() {
     let transfer =
         Transfer::from_text(&"worker ".repeat(2000), TransferSettings::default(), 7).unwrap();
+    let stream_id = transfer.stream_id();
     let source = FrameSource::spawn(transfer);
-    assert_eq!(source.info.session_id, 7);
+    assert_eq!(source.info.stream_id, stream_id);
+    assert_eq!(source.info.cycle_frames, None, "v4 has no carousel");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut frames = Vec::new();
     while frames.len() < 5 {
@@ -147,4 +150,31 @@ fn the_worker_streams_real_frames_in_order_and_stops_when_dropped() {
     // Dropping the source closes the channel; the worker's next send fails
     // and it exits instead of encoding forever into nothing.
     drop(source);
+}
+
+#[test]
+fn a_colour_stream_paints_three_frames_into_each_code() {
+    let settings = TransferSettings {
+        color: true,
+        ..TransferSettings::default()
+    };
+    let transfer = Transfer::from_text(&"colour ".repeat(3000), settings, 7).unwrap();
+    let source = FrameSource::spawn(transfer);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        assert!(Instant::now() < deadline, "the worker produced nothing");
+        if let Some(frame) = source.try_next() {
+            break frame.expect("frames render");
+        }
+        std::thread::yield_now();
+    };
+    let pixels = &frame.image.pixels;
+    // Finders are dark in every layer, so black; data modules take every
+    // mixture of the three channels.
+    assert_eq!(
+        pixels.iter().find(|pixel| **pixel != Color32::WHITE),
+        Some(&Color32::BLACK)
+    );
+    let mixtures: std::collections::HashSet<_> = pixels.iter().copied().collect();
+    assert_eq!(mixtures.len(), 8, "all eight channel mixtures appear");
 }

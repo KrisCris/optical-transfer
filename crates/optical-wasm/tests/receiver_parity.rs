@@ -178,11 +178,12 @@ fn a_foreign_qr_code_is_ignored_without_touching_stream_state() {
 #[test]
 fn a_sender_this_build_cannot_read_says_so_instead_of_going_quiet() {
     let mut receiver = ReceiverState::new();
-    let ReceiverEvent::Incompatible { message } = receiver.add_frame(&[0xd1, 0xc3, 4, 0]) else {
+    // Version 4 is this build's own wire, so the first one it cannot read is 5.
+    let ReceiverEvent::Incompatible { message } = receiver.add_frame(&[0xd1, 0xc3, 5, 0]) else {
         panic!("a newer wire version must be named, not ignored");
     };
     assert!(
-        message.contains('4'),
+        message.contains('5'),
         "the message must name the version: {message}"
     );
 
@@ -369,7 +370,7 @@ fn a_stream_that_will_not_converge_is_abandoned_rather_than_grown() {
     let sender = Sender::new(&packed.container);
     let k = u32::from(sender.source_blocks());
     assert!(k > 24, "the repair degree must exceed 1 for this to bind");
-    let budget = frame_budget(sender.source_blocks());
+    let budget = frame_budget(usize::from(sender.source_blocks()));
 
     let mut receiver = ReceiverState::new();
     let mut abandoned_at = None;

@@ -10,7 +10,7 @@
 
 mod sender;
 
-pub use sender::{SenderInfo, SenderState};
+pub use sender::{SendOptions, SenderInfo, SenderState};
 
 pub use optical_core::receiver::{
     MAX_FRAMES_PER_SOURCE_BLOCK, MIN_FRAME_BUDGET, ReceiverEvent, ReceiverState, ReceiverStats,
@@ -21,7 +21,7 @@ pub use optical_core::receiver::{
 mod bindings {
     use wasm_bindgen::prelude::*;
 
-    use crate::{ReceiverEvent, ReceiverState, ReceiverStats, SenderState};
+    use crate::{ReceiverEvent, ReceiverState, ReceiverStats, SendOptions, SenderState};
 
     /// File preparation and QR generation run inside a dedicated browser worker.
     #[wasm_bindgen]
@@ -59,6 +59,8 @@ mod bindings {
                 .map_err(|error| JsValue::from_str(&error))
         }
 
+        /// `wire` is 4 (this build's format) or 3 (upstream's); `color`
+        /// draws three frames per code, one per colour channel.
         #[wasm_bindgen(js_name = prepareFiles)]
         pub fn prepare_files(
             &mut self,
@@ -66,15 +68,27 @@ mod bindings {
             fps: u32,
             ecc: &str,
             session_id: u16,
+            wire: u8,
+            color: bool,
         ) -> Result<JsValue, JsValue> {
+            let options = SendOptions {
+                frame_bytes,
+                fps,
+                ecc,
+                session_id,
+                wire,
+                color,
+            };
             let info = self
                 .0
-                .prepare_files(frame_bytes, fps, ecc, session_id)
+                .prepare_files(options)
                 .map_err(|error| JsValue::from_str(&error))?;
             serde_wasm_bindgen::to_value(&info)
                 .map_err(|error| JsValue::from_str(&error.to_string()))
         }
 
+        // Positional, as every other method of the JavaScript API is.
+        #[allow(clippy::too_many_arguments)]
         #[wasm_bindgen(js_name = prepareText)]
         pub fn prepare_text(
             &mut self,
@@ -83,16 +97,27 @@ mod bindings {
             fps: u32,
             ecc: &str,
             session_id: u16,
+            wire: u8,
+            color: bool,
         ) -> Result<JsValue, JsValue> {
+            let options = SendOptions {
+                frame_bytes,
+                fps,
+                ecc,
+                session_id,
+                wire,
+                color,
+            };
             let info = self
                 .0
-                .prepare_text(text, frame_bytes, fps, ecc, session_id)
+                .prepare_text(text, options)
                 .map_err(|error| JsValue::from_str(&error))?;
             serde_wasm_bindgen::to_value(&info)
                 .map_err(|error| JsValue::from_str(&error.to_string()))
         }
 
-        /// `count` frames of modules back to back, one byte per module.
+        /// `count` codes of modules back to back, one byte per module whose
+        /// bits are the channels that are dark there.
         #[wasm_bindgen(js_name = nextFrames)]
         pub fn next_frames(&mut self, count: usize) -> Result<Vec<u8>, JsValue> {
             self.0

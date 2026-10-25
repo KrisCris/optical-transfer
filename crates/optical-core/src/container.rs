@@ -6,6 +6,13 @@ use sha2::{Digest, Sha256};
 use crate::{MAX_FILE_BYTES, OpticalError};
 
 const FILE_HEADER_LEN: usize = 49;
+
+/// The largest container a file within [`MAX_FILE_BYTES`] packs into: the
+/// file stored as it is, under the header and the longest name and media type
+/// the header can describe. Wire v4 carries any container up to this, so the
+/// file limit is the one a person meets, not one a few bytes under it.
+pub const MAX_CONTAINER_BYTES: usize = MAX_FILE_BYTES + FILE_HEADER_LEN + 2 * u16::MAX as usize;
+
 const FILE_MAGIC: &[u8; 4] = b"DCF2";
 const GZIP_THRESHOLD: usize = 768;
 const GZIP_MINIMUM_SAVING: usize = 64;

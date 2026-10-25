@@ -109,6 +109,8 @@ struct Reading {
     verdict: Option<String>,
     failure: Option<String>,
     last_accepted: Option<f64>,
+    /// Colour codes read in the last two seconds.
+    colour: bool,
 }
 
 pub struct ReceiveView {
@@ -360,6 +362,7 @@ impl ReceiveView {
             verdict: core.verdict.clone(),
             failure: core.failure.clone(),
             last_accepted: core.last_accepted,
+            colour: core.last_colour.is_some_and(|at| now - at < 2000.0),
         })
     }
 
@@ -661,11 +664,28 @@ impl ReceiveView {
             _ => None,
         };
         let running = matches!(self.stage, Stage::Running(_));
+        // v4's counters mean RaptorQ's things; the labels follow the stream.
+        let v3 = stats.is_none_or(|stats| stats.wire == 3);
         let transfer = [
             ("Payload", stat(&|stats| human_bytes(stats.total_bytes))),
-            ("Blocks (k)", stat(&|stats| stats.total_blocks.to_string())),
             (
-                "Block size",
+                "Format",
+                stat(&|stats| {
+                    let code = if stats.wire == 3 { "LT" } else { "RaptorQ" };
+                    let colour = if reading.is_some_and(|reading| reading.colour) {
+                        " · colour"
+                    } else {
+                        ""
+                    };
+                    format!("v{} · {code}{colour}", stats.wire)
+                }),
+            ),
+            (
+                if v3 { "Blocks (k)" } else { "Symbols (k)" },
+                stat(&|stats| stats.total_blocks.to_string()),
+            ),
+            (
+                if v3 { "Block size" } else { "Symbol size" },
                 stat(&|stats| format!("{} B", stats.block_len)),
             ),
             (
@@ -677,11 +697,11 @@ impl ReceiveView {
                 stat(&|stats| stats.redundant_frames.to_string()),
             ),
             (
-                "Parked eqs",
+                if v3 { "Parked eqs" } else { "Repair held" },
                 stat(&|stats| stats.pending_equations.to_string()),
             ),
             (
-                "Eliminations",
+                if v3 { "Eliminations" } else { "Decode tries" },
                 stat(&|stats| stats.eliminations.to_string()),
             ),
             (

@@ -5,7 +5,10 @@
 //
 //   python3 scripts/serve-web.py --port 8765 &
 //   node scripts/loopback-bench.mjs [--base http://localhost:8765] \
-//     [--runs "codes=1&fps=60" "codes=4&fps=60"] [--size 1048576] [--repeat 2]
+//     [--runs "codes=1&fps=60" "codes=4&fps=60&wire=3"] [--size 1048576] [--repeat 2]
+//
+// Each run is a loopback.html query string; see that page for parameters
+// (wire format, colour, the camera model).
 //
 // Headless, so animation frames are not throttled the way a hidden tab's are.
 
@@ -23,9 +26,13 @@ const base = option("base", "http://localhost:8765");
 const size = option("size", "1048576");
 const repeat = Number(option("repeat", "1"));
 const runsIndex = args.indexOf("--runs");
+// Everything after --runs up to the next option: the option's own value, as
+// in `--repeat 2`, is not a run.
+const runsEnd = args.findIndex((value, index) => index > runsIndex && value.startsWith("--"));
 const runs = runsIndex === -1
-  ? ["codes=1&fps=60&policy=legacy", "codes=1&fps=60", "codes=4&fps=60&policy=legacy", "codes=4&fps=60"]
-  : args.slice(runsIndex + 1).filter((value) => !value.startsWith("--"));
+  ? ["codes=1&fps=60&wire=3", "codes=1&fps=60", "codes=4&fps=60&wire=3", "codes=4&fps=60",
+    "codes=1&fps=60&color=1&chroma=1"]
+  : args.slice(runsIndex + 1, runsEnd === -1 ? undefined : runsEnd);
 const chrome = option("chrome", process.platform === "darwin"
   ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "google-chrome");
 
@@ -75,13 +82,16 @@ function session(url) {
 }
 
 try {
-  console.log("policy   codes fps  bytes   seconds  avg KiB/s  peak    catch  overhead  capture decode  tracked-ms  hz  drop%  util  ok");
+  console.log("policy   wire colour codes fps  bytes   seconds  avg KiB/s  peak    catch  overhead  capture decode  tracked-ms  hz  drop%  util  ok");
   for (const run of runs) {
     for (let attempt = 0; attempt < repeat; attempt++) {
       const target = await json(`/json/new?${encodeURIComponent(`${base}/tests/loopback.html?${run}&size=${size}`)}`, { method: "PUT" });
       const page = session(target.webSocketDebuggerUrl);
       let result = null;
-      for (let tick = 0; tick < 400 && !result?.final; tick++) {
+      // Half-second polls until the page's own timeout, plus a minute of
+      // headroom for loading and preparing a large file.
+      const timeout = Number(new URLSearchParams(run).get("timeout") ?? 120);
+      for (let tick = 0; tick < (timeout + 60) * 2 && !result?.final; tick++) {
         await sleep(500);
         const reply = await page.send("Runtime.evaluate", { expression: "JSON.stringify(window.benchResult ?? null)", returnByValue: true });
         result = JSON.parse(reply.result?.result?.value ?? "null");
@@ -93,8 +103,10 @@ try {
         continue;
       }
       const c = result.config;
+      const colour = c.color ? (c.chroma ? "4:2:0" : "rgb") : c.chroma ? "mono*" : "mono";
       console.log([
-        c.policy.padEnd(8), String(c.codes).padStart(5), String(c.fps).padStart(4), String(c.bytes).padStart(6),
+        c.policy.padEnd(8), `v${result.wire ?? 3}`.padStart(4), colour.padStart(6),
+        String(c.codes).padStart(5), String(c.fps).padStart(4), String(c.bytes).padStart(6),
         String(result.seconds).padStart(9), String(result.averageKiBs).padStart(10), String(result.peakKiBs).padStart(7),
         String(result.catchRate).padStart(7), String(result.overhead).padStart(9),
         String(result.captureFps).padStart(8), String(result.decodeFps).padStart(6),
@@ -105,7 +117,12 @@ try {
     }
   }
 } finally {
+  // A loaded machine can take seconds to stop Chrome, whose helpers write to
+  // the profile until they exit.
+  const exited = browser.exitCode !== null || browser.signalCode !== null
+    ? Promise.resolve()
+    : new Promise((resolve) => browser.once("exit", resolve));
   browser.kill();
-  await sleep(300);
-  rmSync(profile, { recursive: true, force: true });
+  await Promise.race([exited, sleep(10_000)]);
+  rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }

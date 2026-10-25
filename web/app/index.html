@@ -154,6 +154,7 @@
           <h3>Stream</h3>
           <dl>
             <div><dt>Payload</dt><dd id="t-size">—</dd></div>
+            <div><dt>Format</dt><dd id="t-wire">—</dd></div>
             <div><dt>Blocks (k)</dt><dd id="t-k">—</dd></div>
             <div><dt>Block size</dt><dd id="t-blocklen">—</dd></div>
             <div><dt>Unique / dup</dt><dd id="t-frames">—</dd></div>
@@ -203,7 +204,7 @@
           <input id="tx-files" type="file" multiple />
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" /></svg>
           <span><b>Choose files</b> or drop them here</span>
-          <small>Several files travel as one transfer.zip · 64 MiB total</small>
+          <small>Several files travel as one transfer.zip · 128 MiB total</small>
         </label>
         <div class="row">
           <label class="btn ghost small" id="tx-folder-button">
@@ -228,6 +229,7 @@
         <label><input type="radio" name="tx-preset" value="reliable" /><span><b>Reliable</b><small>1 code · 24 fps</small></span></label>
         <label><input type="radio" name="tx-preset" value="balanced" /><span><b>Balanced</b><small>2 codes · 30 fps</small></span></label>
         <label><input type="radio" name="tx-preset" value="fast" checked /><span><b>Fast</b><small>1 code · 60 fps</small></span></label>
+        <label><input type="radio" name="tx-preset" value="color" /><span><b>Colour</b><small>1 code ×3 · 60 fps</small></span></label>
         <label><input type="radio" name="tx-preset" value="max" /><span><b>Max</b><small>4 codes · 60 fps</small></span></label>
       </div>
       <details class="advanced">
@@ -239,8 +241,15 @@
           <label>Error correction
             <select id="tx-ecc"><option>L</option><option>M</option><option>Q</option><option>H</option></select>
           </label>
+          <label>Wire format
+            <select id="tx-wire"><option value="4">v4 · RaptorQ</option><option value="3">v3 · upstream</option></select>
+          </label>
+          <label>Colour
+            <select id="tx-color"><option value="0">Off</option><option value="1">Red, green, blue</option></select>
+          </label>
         </div>
         <p class="fine">Denser codes and higher rates need a steadier, closer camera. A 60 Hz display shows each frame at 60 fps for one refresh only; drop to 30 if the receiver struggles. 120 fps needs a display that refreshes at least that fast (Safari holds pages to 60 Hz unless its “Prefer Page Rendering Updates near 60fps” feature flag is off) and a receiver capturing at 120.</p>
+        <p class="fine">Colour stacks three codes in the red, green and blue channels: three times the data per code, but only while the code fills most of the camera’s view. Wire v4 finishes from almost exactly the data sent and carries up to 128 MiB; choose v3 only for an upstream Decimen receiver, which reads neither v4 nor colour.</p>
       </details>
       <div class="actions">
         <button id="tx-start" type="button" class="btn primary">Start sending</button>
@@ -273,7 +282,7 @@
         <div><dt>Payload</dt><dd id="s-payload">—</dd></div>
         <div><dt>Compression</dt><dd id="s-compression">—</dd></div>
         <div><dt>Code</dt><dd id="s-code">—</dd></div>
-        <div><dt>Blocks (k)</dt><dd id="s-k">—</dd></div>
+        <div><dt>Source (k)</dt><dd id="s-k">—</dd></div>
         <div><dt>Raw rate</dt><dd id="s-rate">—</dd></div>
         <div><dt>Best case</dt><dd id="s-ideal">—</dd></div>
         <div><dt>Frames shown</dt><dd id="s-frames">—</dd></div>

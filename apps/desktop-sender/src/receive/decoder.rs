@@ -20,18 +20,32 @@
 //! fail on the same captures. The vendored build's tracked fast path is a
 //! custom addition to zxing-cpp that upstream does not have, so every crop
 //! here is a detect-and-decode.
+//!
+//! A colour code is three codes in the red, green and blue channels sharing
+//! one geometry. Read for brightness it is found and does not decode, or
+//! decodes as the layer luma favours, so wherever a code has colour in it the
+//! layers are unmixed ([`crate::receive::unmix`]) and each is read on its own.
 
 use std::time::Instant;
 
 use zxingcpp::{BarcodeFormat, BarcodeReader, ImageFormat, ImageView};
 
-use crate::receive::tracker::{Bounds, Crop};
+use crate::receive::{
+    camera::LumaFrame,
+    tracker::{Bounds, Crop},
+    unmix::{Unmixing, layers, unmixing},
+};
+
+/// Codes a full scan checks for colour.
+const COLOR_SIGHTINGS: usize = 4;
 
 /// One decoded code, in whole-frame pixels.
 #[derive(Clone, Debug)]
 pub struct Symbol {
     pub bytes: Vec<u8>,
     pub bounds: Bounds,
+    /// Read from one layer of a colour code.
+    pub colour: bool,
 }
 
 #[derive(Debug, Default)]
@@ -75,70 +89,164 @@ impl Decoder {
         }
     }
 
-    /// Decode `area` of a `width`×`height` luma frame. A full scan also
-    /// reports sightings.
-    pub fn decode(
-        &self,
-        luma: &[u8],
-        width: usize,
-        height: usize,
-        area: Crop,
-        full: bool,
-    ) -> Reply {
+    /// Decode `area` of a camera frame. A full scan also reports sightings.
+    pub fn decode(&self, frame: &LumaFrame, area: Crop, full: bool) -> Reply {
         let started = Instant::now();
         let mut reply = Reply::default();
-        let Ok(view) = ImageView::from_slice(luma, width as i32, height as i32, ImageFormat::Lum)
-        else {
-            return reply;
-        };
-        let view = if full {
-            view
-        } else {
-            view.cropped(area.x as i32, area.y as i32, area.w as i32, area.h as i32)
-        };
-        let reader = if full { &self.full } else { &self.crop };
-        let (offset_x, offset_y) = if full {
-            (0.0, 0.0)
-        } else {
-            (area.x as f32, area.y as f32)
-        };
-        if let Ok(barcodes) = reader.from(view) {
-            for barcode in barcodes {
-                let position = barcode.position();
-                let corners = [
-                    position.top_left,
-                    position.top_right,
-                    position.bottom_right,
-                    position.bottom_left,
-                ];
-                let xs = corners.map(|point| point.x as f32);
-                let ys = corners.map(|point| point.y as f32);
-                let (left, top) = (
-                    xs.iter().copied().fold(f32::MAX, f32::min),
-                    ys.iter().copied().fold(f32::MAX, f32::min),
-                );
-                let (right, bottom) = (
-                    xs.iter().copied().fold(f32::MIN, f32::max),
-                    ys.iter().copied().fold(f32::MIN, f32::max),
-                );
-                let bounds = Bounds {
-                    x: offset_x + left,
-                    y: offset_y + top,
-                    w: right - left,
-                    h: bottom - top,
-                };
-                if barcode.is_valid() {
-                    let bytes = barcode.bytes();
-                    if !bytes.is_empty() {
-                        reply.symbols.push(Symbol { bytes, bounds });
-                    }
-                } else if full && bounds.w > 0.0 && bounds.h > 0.0 {
-                    reply.sightings.push(bounds);
-                }
+        // Colour first wherever the code has colour in it. A crop is the
+        // code's last bounds padded on every side, so its middle is code.
+        if !full {
+            let middle = Crop {
+                x: area.x + area.w * 3 / 10,
+                y: area.y + area.h * 3 / 10,
+                w: area.w * 2 / 5,
+                h: area.h * 2 / 5,
+            };
+            if let Some(unmix) = unmixing(frame, middle) {
+                self.read_layers(frame, area, &unmix, &mut reply);
             }
+        }
+        if reply.symbols.is_empty()
+            && let Ok(view) = ImageView::from_slice(
+                &frame.pixels,
+                frame.width as i32,
+                frame.height as i32,
+                ImageFormat::Lum,
+            )
+        {
+            if full {
+                self.read(&self.full, view, (0.0, 0.0), true, false, &mut reply);
+            } else {
+                let view = view.cropped(area.x as i32, area.y as i32, area.w as i32, area.h as i32);
+                let offset = (area.x as f32, area.y as f32);
+                self.read(&self.crop, view, offset, false, false, &mut reply);
+            }
+        }
+        if full {
+            self.read_colour(frame, &mut reply);
         }
         reply.decode_ms = started.elapsed().as_secs_f64() * 1000.0;
         reply
+    }
+
+    /// A full scan is how a colour code is first acquired. Read for
+    /// brightness it is found and not decoded, or decoded as whichever layer
+    /// dominates luma (green), so every code the scan found is checked for
+    /// colour and, where it has some, read layer by layer instead.
+    fn read_colour(&self, frame: &LumaFrame, reply: &mut Reply) {
+        let found: Vec<(Bounds, Option<Symbol>)> = reply
+            .symbols
+            .drain(..)
+            .map(|symbol| (symbol.bounds, Some(symbol)))
+            .chain(reply.sightings.drain(..).map(|bounds| (bounds, None)))
+            .collect();
+        let mut attempts = 0;
+        for (bounds, symbol) in found {
+            let centre = (bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0);
+            let layered = reply.symbols.iter().any(|symbol| {
+                let b = symbol.bounds;
+                symbol.colour
+                    && (b.x..=b.x + b.w).contains(&centre.0)
+                    && (b.y..=b.y + b.h).contains(&centre.1)
+            });
+            if layered {
+                continue;
+            }
+            let unmix = (attempts < COLOR_SIGHTINGS)
+                .then(|| unmixing(frame, crop_of(bounds, 0.0, frame)))
+                .flatten();
+            let before = reply.symbols.len();
+            if let Some(unmix) = unmix {
+                attempts += 1;
+                self.read_layers(frame, crop_of(bounds, 0.1, frame), &unmix, reply);
+            }
+            if reply.symbols.len() == before {
+                match symbol {
+                    Some(symbol) => reply.symbols.push(symbol),
+                    None => reply.sightings.push(bounds),
+                }
+            }
+        }
+    }
+
+    /// The three layers of a colour code in `crop`, each decoded on its own.
+    fn read_layers(&self, frame: &LumaFrame, crop: Crop, unmix: &Unmixing, reply: &mut Reply) {
+        let offset = (crop.x as f32, crop.y as f32);
+        for layer in layers(frame, crop, unmix) {
+            if let Ok(view) =
+                ImageView::from_slice(&layer, crop.w as i32, crop.h as i32, ImageFormat::Lum)
+            {
+                self.read(&self.crop, view, offset, false, true, reply);
+            }
+        }
+    }
+
+    /// Run `reader` over `view`, whose origin sits at `offset` in the frame.
+    fn read(
+        &self,
+        reader: &BarcodeReader,
+        view: ImageView<'_>,
+        offset: (f32, f32),
+        sightings: bool,
+        colour: bool,
+        reply: &mut Reply,
+    ) {
+        let Ok(barcodes) = reader.from(view) else {
+            return;
+        };
+        for barcode in barcodes {
+            let position = barcode.position();
+            let corners = [
+                position.top_left,
+                position.top_right,
+                position.bottom_right,
+                position.bottom_left,
+            ];
+            let xs = corners.map(|point| point.x as f32);
+            let ys = corners.map(|point| point.y as f32);
+            let (left, top) = (
+                xs.iter().copied().fold(f32::MAX, f32::min),
+                ys.iter().copied().fold(f32::MAX, f32::min),
+            );
+            let (right, bottom) = (
+                xs.iter().copied().fold(f32::MIN, f32::max),
+                ys.iter().copied().fold(f32::MIN, f32::max),
+            );
+            let bounds = Bounds {
+                x: offset.0 + left,
+                y: offset.1 + top,
+                w: right - left,
+                h: bottom - top,
+            };
+            if barcode.is_valid() {
+                let bytes = barcode.bytes();
+                if !bytes.is_empty() {
+                    reply.symbols.push(Symbol {
+                        bytes,
+                        bounds,
+                        colour,
+                    });
+                }
+            } else if sightings && bounds.w > 0.0 && bounds.h > 0.0 {
+                reply.sightings.push(bounds);
+            }
+        }
+    }
+}
+
+/// `bounds` grown by `fraction` of its size on every side, as whole pixels
+/// inside the frame.
+fn crop_of(bounds: Bounds, fraction: f32, frame: &LumaFrame) -> Crop {
+    let pad = bounds.w.max(bounds.h) * fraction;
+    let x = (bounds.x - pad).floor().max(0.0) as usize;
+    let y = (bounds.y - pad).floor().max(0.0) as usize;
+    let right = ((bounds.x + bounds.w + pad).ceil().max(0.0) as usize).min(frame.width);
+    let bottom = ((bounds.y + bounds.h + pad).ceil().max(0.0) as usize).min(frame.height);
+    Crop {
+        x: x.min(right),
+        y: y.min(bottom),
+        w: right.saturating_sub(x),
+        h: bottom.saturating_sub(y),
     }
 }
 

@@ -12,6 +12,7 @@
 //! synthetic rasterise-then-reparse would test nothing but this file.
 
 use optical_core::{
+    protocol::Wire,
     qr::Ecc,
     transfer::{FRAME_BYTES_OPTIONS, Transfer, TransferSettings},
 };
@@ -98,50 +99,64 @@ fn every_offered_setting_produces_a_stream_the_receiver_can_finish() {
     let text = "settings sweep. ".repeat(500);
     for frame_bytes in FRAME_BYTES_OPTIONS {
         for ecc in Ecc::ALL {
-            let settings = TransferSettings {
-                frame_bytes,
-                ecc,
-                ..TransferSettings::default()
-            };
-            let transfer = match Transfer::from_text(&text, settings, 0x2222) {
-                Ok(transfer) => transfer,
-                // Refused up front with a message is the correct answer for a
-                // density the ECC cannot carry; silence would not be.
-                Err(error) => {
-                    assert!(
-                        !error.to_string().is_empty(),
-                        "a refusal must say something"
-                    );
-                    continue;
-                }
-            };
-            let ReceiverEvent::Complete { bytes, .. } = run(transfer, 5, 60_000) else {
-                unreachable!("run only returns Complete")
-            };
-            assert_eq!(
-                String::from_utf8(bytes).unwrap(),
-                text,
-                "{frame_bytes} bytes at ECC {} lost data",
-                ecc.label()
-            );
+            for wire in Wire::ALL {
+                let settings = TransferSettings {
+                    frame_bytes,
+                    ecc,
+                    wire,
+                    ..TransferSettings::default()
+                };
+                let transfer = match Transfer::from_text(&text, settings, 0x2222) {
+                    Ok(transfer) => transfer,
+                    // Refused up front with a message is the correct answer for a
+                    // density the ECC cannot carry; silence would not be.
+                    Err(error) => {
+                        assert!(
+                            !error.to_string().is_empty(),
+                            "a refusal must say something"
+                        );
+                        continue;
+                    }
+                };
+                let ReceiverEvent::Complete { bytes, .. } = run(transfer, 5, 60_000) else {
+                    unreachable!("run only returns Complete")
+                };
+                assert_eq!(
+                    String::from_utf8(bytes).unwrap(),
+                    text,
+                    "{frame_bytes} bytes at ECC {} on {} lost data",
+                    ecc.label(),
+                    wire.label()
+                );
+            }
         }
     }
 }
 
 #[test]
 fn a_receiver_joining_mid_carousel_still_completes() {
-    // There is no handshake and none is needed: the carousel repeats forever,
-    // so a phone pointed at a screen that has been streaming for a while has to
-    // work exactly as well as one that caught the first frame.
+    // There is no handshake and none is needed: the stream goes on forever, so
+    // a phone pointed at a screen that has been streaming for a while has to
+    // work exactly as well as one that caught the first frame. On v3 that is a
+    // carousel; on v4 everything after the first sweep is repair symbols.
     let text = "joined late. ".repeat(400);
-    let mut transfer = Transfer::from_text(&text, TransferSettings::default(), 0x7777).unwrap();
-    // Burn most of a cycle before the receiver looks at the screen.
-    for _ in 0..(transfer.cycle_frames() * 3 / 2) {
-        let _ = transfer.next_payload();
-    }
+    for wire in Wire::ALL {
+        let settings = TransferSettings {
+            wire,
+            ..TransferSettings::default()
+        };
+        let mut transfer = Transfer::from_text(&text, settings, 0x7777).unwrap();
+        // Burn a cycle and a half (v3) or a sweep and a half (v4) first.
+        let burn = transfer
+            .cycle_frames()
+            .unwrap_or(transfer.source_blocks() * 2);
+        for _ in 0..(burn * 3 / 2) {
+            let _ = transfer.next_payload();
+        }
 
-    let ReceiverEvent::Complete { bytes, .. } = run(transfer, 6, 20_000) else {
-        unreachable!("run only returns Complete")
-    };
-    assert_eq!(String::from_utf8(bytes).unwrap(), text);
+        let ReceiverEvent::Complete { bytes, .. } = run(transfer, 6, 20_000) else {
+            unreachable!("run only returns Complete")
+        };
+        assert_eq!(String::from_utf8(bytes).unwrap(), text, "{}", wire.label());
+    }
 }

@@ -60,6 +60,7 @@ let running = false;
 let generation = 0;
 let cameraStartedAt = 0;
 let lastAcceptedAt = 0;
+let lastColorAt = -Infinity;
 let verdict = null;
 let objectUrl = null;
 let renderHandle = 0;
@@ -326,6 +327,7 @@ function onReply(job, reply) {
   for (const box of reply.sightings ?? []) tracker.noteSighting(box, now);
   for (const symbol of reply.symbols ?? []) {
     tracker.noteDecoded(symbol.box, now, symbol.quad, symbol.modules);
+    if (symbol.color) lastColorAt = now;
     if (!completed) handleFrame(symbol.bytes, job.capturedAt, now);
   }
 }
@@ -501,6 +503,14 @@ function render(now, force = false) {
   // Telemetry panel.
   const totals = snap.totals;
   t("size").textContent = stats ? formatBytes(stats.totalBytes) : "—";
+  // v4's counters mean RaptorQ's things; the labels follow the stream.
+  const v3 = stats?.wire === 3;
+  t("wire").textContent = stats
+    ? `v${stats.wire} · ${v3 ? "LT" : "RaptorQ"}${now - lastColorAt < 2000 ? " · colour" : ""}` : "—";
+  t("k").previousElementSibling.textContent = v3 || !stats ? "Blocks (k)" : "Symbols (k)";
+  t("blocklen").previousElementSibling.textContent = v3 || !stats ? "Block size" : "Symbol size";
+  t("pending").previousElementSibling.textContent = v3 || !stats ? "Parked eqs" : "Repair held";
+  t("elim").previousElementSibling.textContent = v3 || !stats ? "Eliminations" : "Decode tries";
   t("k").textContent = stats ? stats.totalBlocks.toLocaleString() : "—";
   t("blocklen").textContent = stats ? `${stats.blockLen.toLocaleString()} B` : "—";
   t("frames").textContent = stats ? `${stats.uniqueFrames} / ${stats.duplicateFrames}` : "—";

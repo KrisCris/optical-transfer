@@ -141,7 +141,10 @@ export class RegionTracker {
       const w = Math.min(width - x, Math.ceil(region.w + 2 * pad));
       const h = Math.min(height - y, Math.ceil(region.h + 2 * pad));
       if (w < MIN_CROP || h < MIN_CROP) continue;
-      crops.push({ x, y, w, h, quad: region.quad, modules: region.modules, region: region.id });
+      // The region's own bounds tell the worker where the code is when
+      // there is no quad yet, which is what unmixing a colour code needs.
+      const box = { x: region.x, y: region.y, w: region.w, h: region.h };
+      crops.push({ x, y, w, h, quad: region.quad, modules: region.modules, region: region.id, box });
       free--;
     }
     this.rotate++;
@@ -274,15 +277,15 @@ export class CaptureLoop {
     this.context.drawImage(video, 0, 0);
     this.onCapture(now, plan);
 
-    const submit = (x, y, w, h, full, quad, modules) => {
+    const submit = (x, y, w, h, full, quad, modules, box) => {
       const image = this.context.getImageData(x, y, w, h);
       const id = this.nextId++;
-      const message = { id, buffer: image.data.buffer, width: w, height: h, offsetX: x, offsetY: y, full, quad, modules };
+      const message = { id, buffer: image.data.buffer, width: w, height: h, offsetX: x, offsetY: y, full, quad, modules, box };
       return this.pool.submit({ id, generation, capturedAt: now, full, area: w * h, message }, [image.data.buffer]);
     };
     if (plan.full) submit(0, 0, width, height, true);
     for (const crop of plan.crops) {
-      if (!submit(crop.x, crop.y, crop.w, crop.h, false, crop.quad, crop.modules)) break;
+      if (!submit(crop.x, crop.y, crop.w, crop.h, false, crop.quad, crop.modules, crop.box)) break;
     }
   }
 }

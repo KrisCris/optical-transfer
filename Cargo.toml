@@ -15,3 +15,11 @@ license = "AGPL-3.0-or-later"
 [profile.release]
 lto = "thin"
 strip = true
+
+# RaptorQ's encoder and decoder are a few hundred times slower unoptimised,
+# and its debug assertions re-verify whole sparse matrices after every step,
+# which turns a multi-megabyte round trip in the test suite into minutes.
+[profile.dev.package.raptorq]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

@@ -6,12 +6,12 @@
 //! that before it starts streaming and name the setting that fixes it.
 
 use optical_core::{
-    MAX_FILE_BYTES,
+    V3_MAX_FILE_BYTES as MAX_FILE_BYTES,
     capacity::{
         MAX_SOURCE_BLOCKS, block_length, fits_in_one_stream, minimum_frame_bytes,
         smallest_sufficient_frame_size, source_block_count,
     },
-    protocol::HEADER_LEN,
+    protocol::{HEADER_LEN, V4_HEADER_LEN, Wire},
 };
 
 /// The sender's real bytes-per-frame choices, so these hold for what is on
@@ -20,11 +20,14 @@ const OFFERED: [usize; 6] = [500, 1000, 1465, 1850, 2331, 2953];
 
 #[test]
 fn the_header_takes_its_cut_off_every_frame() {
-    assert_eq!(block_length(2953), Some(2953 - HEADER_LEN));
-    assert_eq!(block_length(500), Some(500 - HEADER_LEN));
+    assert_eq!(block_length(2953, Wire::V3), Some(2953 - HEADER_LEN));
+    assert_eq!(block_length(500, Wire::V3), Some(500 - HEADER_LEN));
     // A frame with no room for a payload is not a frame.
-    assert_eq!(block_length(HEADER_LEN), None);
-    assert_eq!(block_length(0), None);
+    assert_eq!(block_length(HEADER_LEN, Wire::V3), None);
+    assert_eq!(block_length(0, Wire::V3), None);
+    // Wire v4's header is six bytes shorter, and every frame gets them back.
+    assert_eq!(block_length(2953, Wire::V4), Some(2953 - V4_HEADER_LEN));
+    assert_eq!(block_length(V4_HEADER_LEN, Wire::V4), None);
 }
 
 #[test]
@@ -32,7 +35,7 @@ fn block_count_rounds_up_because_a_partial_block_still_needs_a_frame() {
     // Derived from block_length rather than written out: these boundaries move
     // whenever the header does, and a wire-format change should not look like a
     // capacity bug.
-    let per_frame = block_length(2953).unwrap();
+    let per_frame = block_length(2953, Wire::V3).unwrap();
     assert_eq!(source_block_count(1, 2953), Some(1));
     assert_eq!(source_block_count(per_frame, 2953), Some(1));
     assert_eq!(source_block_count(per_frame + 1, 2953), Some(2));

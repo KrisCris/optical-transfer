@@ -3,7 +3,7 @@ use std::io::Write;
 use flate2::{Compression as FlateCompression, write::GzEncoder};
 use optical_core::{
     MAX_FILE_BYTES,
-    container::{Compression, pack_file, unpack_file, verify_file},
+    container::{Compression, MAX_CONTAINER_BYTES, pack_file, unpack_file, verify_file},
     snippet::{MAX_SNIPPET_BYTES, is_snippet, pack_snippet, snippet_text},
 };
 
@@ -41,6 +41,20 @@ fn boundaries_and_precompressed_policy_match_upstream() {
         )
         .is_err()
     );
+
+    // A stored file grows by its header, name and media type. At their
+    // longest that is exactly the allowance wire v4 makes, so any file within
+    // the limit packs into a container v4 carries.
+    let name = "n".repeat(usize::from(u16::MAX));
+    let media_type = "m".repeat(usize::from(u16::MAX));
+    let longest = pack_file(&name, &media_type, &[1]).unwrap();
+    assert_eq!(longest.compression, Compression::None);
+    assert_eq!(
+        longest.container.len() - 1,
+        MAX_CONTAINER_BYTES - MAX_FILE_BYTES
+    );
+    assert!(pack_file(&format!("{name}n"), &media_type, &[1]).is_err());
+    assert!(pack_file(&name, &format!("{media_type}m"), &[1]).is_err());
 
     let repeated = vec![b'x'; 8192];
     assert_eq!(

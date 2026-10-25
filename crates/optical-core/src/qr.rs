@@ -153,3 +153,37 @@ pub fn grid_dims(count: usize) -> Option<(usize, usize)> {
 
 /// Code counts that tile without a gap, for the sender's own control.
 pub const GRID_OPTIONS: [usize; 5] = [1, 2, 4, 6, 9];
+
+/// Frames of one stream drawn as one code: one byte per module whose bit `c`
+/// is set where the frame in channel `c` (red, green, blue) is dark.
+///
+/// One frame is plain black and white, every bit set or none. Three frames
+/// make a colour code: each channel of the picture is an ordinary QR code, so
+/// a receiver splits the channels and reads each with the same decoder. Every
+/// frame of a stream has the same version, ECC and mask, so finder, timing and
+/// alignment patterns coincide and stay black and white; only data modules
+/// take colour, and a decoder looking at brightness still finds the code.
+///
+/// A camera keeps colour at half resolution (4:2:0), so colour pays only where
+/// modules are large in the picture: at about 4 camera pixels per module or
+/// more, where black and white needs only 2.2.
+pub fn compose(layers: &[QrFrame]) -> Vec<u8> {
+    let Some(first) = layers.first() else {
+        return Vec::new();
+    };
+    if layers.len() == 1 {
+        return first
+            .pixels
+            .iter()
+            .map(|&dark| if dark { 0b111 } else { 0 })
+            .collect();
+    }
+    let mut modules = vec![0_u8; first.pixels.len()];
+    for (channel, layer) in layers.iter().enumerate().take(3) {
+        assert_eq!(layer.size, first.size, "every layer shares one geometry");
+        for (module, &dark) in modules.iter_mut().zip(&layer.pixels) {
+            *module |= u8::from(dark) << channel;
+        }
+    }
+    modules
+}

@@ -4,17 +4,20 @@
 import { CodeDisplay } from "./code-display.js";
 import { formatBytes, formatDuration, formatRate } from "./format.js";
 
+// Presets choose speed, not compatibility: the wire format stays as set.
 const PRESETS = {
-  reliable: { bytes: 1465, fps: 24, codes: 1 },
-  balanced: { bytes: 2331, fps: 30, codes: 2 },
-  fast: { bytes: 2953, fps: 60, codes: 1 },
-  max: { bytes: 2953, fps: 60, codes: 4 },
+  reliable: { bytes: 1465, fps: 24, codes: 1, color: false },
+  balanced: { bytes: 2331, fps: 30, codes: 2, color: false },
+  fast: { bytes: 2953, fps: 60, codes: 1, color: false },
+  color: { bytes: 2953, fps: 60, codes: 1, color: true },
+  max: { bytes: 2953, fps: 60, codes: 4, color: false },
 };
 const BYTES_OPTIONS = [500, 1000, 1465, 1850, 2331, 2953];
 const FPS_OPTIONS = [10, 15, 20, 24, 30, 55, 60, 120];
 const CODES_OPTIONS = [1, 2, 4, 6, 9];
-const HEADER_BYTES = 22;
-const MAX_BYTES = 64 * 1024 * 1024;
+// Per wire version: v4 is this app's RaptorQ format, v3 upstream Decimen's.
+const HEADER_BYTES = { 3: 22, 4: 16 };
+const MAX_BYTES = { 3: 64 * 1024 * 1024, 4: 128 * 1024 * 1024 };
 const MAX_TEXT = 4 * 1024 * 1024;
 const MAX_FILES = 256;
 
@@ -24,7 +27,8 @@ const els = {
   drop: $("tx-drop"), files: $("tx-files"), folder: $("tx-folder"), folderButton: $("tx-folder-button"),
   summary: $("tx-summary"), clear: $("tx-clear"), list: $("tx-list"),
   text: $("tx-text"), textCount: $("tx-text-count"),
-  bytes: $("tx-bytes"), fps: $("tx-fps"), codes: $("tx-codes"), ecc: $("tx-ecc"), presetRate: $("tx-preset-rate"),
+  bytes: $("tx-bytes"), fps: $("tx-fps"), codes: $("tx-codes"), ecc: $("tx-ecc"),
+  wire: $("tx-wire"), color: $("tx-color"), presetRate: $("tx-preset-rate"),
   start: $("tx-start"), stop: $("tx-stop"), status: $("tx-status"), error: $("tx-error"),
   stage: $("tx-stage"), canvas: $("tx-canvas"), fullscreen: $("tx-fullscreen"), exit: $("tx-exit"),
   session: $("s-session"), cycleBar: $("s-cycle-bar"), cycle: $("s-cycle"),
@@ -59,8 +63,10 @@ function addFiles(list, fromFolder) {
   }
   const next = [...selected, ...incoming.map((file) => ({ file, path: fromFolder ? file.webkitRelativePath : "" }))];
   if (next.length > MAX_FILES) return showError(`Choose at most ${MAX_FILES} files.`);
-  if (next.reduce((sum, item) => sum + item.file.size, 0) > MAX_BYTES) {
-    return showError("That is over the 64 MiB limit, including ZIP overhead.");
+  // The larger limit: a v3 stream's lower one is enforced when it starts, so
+  // switching to v4 does not mean choosing the files again.
+  if (next.reduce((sum, item) => sum + item.file.size, 0) > MAX_BYTES[4]) {
+    return showError("That is over the 128 MiB limit, including ZIP overhead.");
   }
   showError("");
   selected = next;
@@ -142,6 +148,8 @@ function readSettings() {
     fps: Number(els.fps.value),
     codes: Number(els.codes.value),
     ecc: els.ecc.value,
+    wire: Number(els.wire.value),
+    color: els.color.value === "1",
   };
 }
 
@@ -151,6 +159,7 @@ function applyPreset(name) {
   els.bytes.value = String(preset.bytes);
   els.fps.value = String(preset.fps);
   els.codes.value = String(preset.codes);
+  els.color.value = preset.color ? "1" : "0";
   els.ecc.value = "L";
   settingsChanged();
 }
@@ -158,14 +167,18 @@ function applyPreset(name) {
 function settingsChanged() {
   const next = readSettings();
   const match = Object.entries(PRESETS).find(([, preset]) =>
-    preset.bytes === next.frameBytes && preset.fps === next.fps && preset.codes === next.codes && next.ecc === "L");
+    preset.bytes === next.frameBytes && preset.fps === next.fps && preset.codes === next.codes
+      && preset.color === next.color && next.ecc === "L");
   for (const input of presetInputs) input.checked = match?.[0] === input.value;
-  const raw = (next.fps * next.codes * (next.frameBytes - HEADER_BYTES)) / 1024;
+  const layers = next.color ? 3 : 1;
+  const raw = (next.fps * next.codes * layers * (next.frameBytes - HEADER_BYTES[next.wire])) / 1024;
   els.presetRate.textContent = `${formatRate(raw)} on the wire`;
   if (!worker || !settings) return;
-  // Bytes per code and ECC are baked into every frame: re-encode. Frame rate
-  // and code count only change the display, so the stream keeps its place.
-  if (next.frameBytes !== settings.frameBytes || next.ecc !== settings.ecc) {
+  // Bytes per code, ECC, wire format and colour are baked into every frame:
+  // re-encode. Frame rate and code count only change the display, so the
+  // stream keeps its place.
+  if (next.frameBytes !== settings.frameBytes || next.ecc !== settings.ecc
+    || next.wire !== settings.wire || next.color !== settings.color) {
     stopSending();
     void startSending();
   } else {
@@ -176,7 +189,9 @@ function settingsChanged() {
 }
 
 for (const input of presetInputs) input.addEventListener("change", () => applyPreset(input.value));
-for (const select of [els.bytes, els.fps, els.codes, els.ecc]) select.addEventListener("change", settingsChanged);
+for (const select of [els.bytes, els.fps, els.codes, els.ecc, els.wire, els.color]) {
+  select.addEventListener("change", settingsChanged);
+}
 applyPreset("fast");
 
 // ---------------------------------------------------------------- display
@@ -265,14 +280,19 @@ function lock(locked) {
 function showStreamInfo() {
   if (!info) return;
   const blockLen = info.blockLen;
-  els.session.textContent = `session ${info.sessionId.toString(16).padStart(4, "0")}`;
+  // v3 names a stream by its random session; v4 by the container checksum,
+  // so a restarted sender carries on the transfer a receiver already has.
+  els.session.textContent = info.wire === 3
+    ? `v3 · session ${info.streamId.toString(16).padStart(4, "0")}`
+    : `v4 · stream ${info.streamId.toString(16).padStart(8, "0")}`;
   els.payload.textContent = `${formatBytes(info.originalBytes)}${info.fileCount > 1 ? ` · ${info.fileCount} files` : ""}`;
   els.compression.textContent = info.compressed ? `gzip → ${formatBytes(info.transmittedBytes)}` : "none (incompressible)";
-  els.code.textContent = `V${info.qrVersion} ×${settings.codes} · ECC ${settings.ecc}`;
+  els.code.textContent = `V${info.qrVersion} ×${settings.codes}${info.layers > 1 ? " · colour" : ""} · ECC ${settings.ecc}`;
   els.k.textContent = `${info.sourceBlocks.toLocaleString()} × ${blockLen} B`;
   const perSecond = settings.fps * settings.codes;
-  els.rate.textContent = `${formatRate((perSecond * blockLen) / 1024)} · ${perSecond} codes/s`;
-  const ideal = info.sourceBlocks / perSecond;
+  const framesPerSecond = perSecond * info.layers;
+  els.rate.textContent = `${formatRate((framesPerSecond * blockLen) / 1024)} · ${perSecond} codes/s`;
+  const ideal = info.sourceBlocks / framesPerSecond;
   els.ideal.textContent = ideal < 0.1 ? "one frame" : formatDuration(ideal);
   els.ideal.title = "One clean sweep with no missed frames";
 }
@@ -283,12 +303,22 @@ function statsLoop() {
   const now = performance.now();
   if (now - lastStats < 200) return;
   lastStats = now;
-  const cycle = info.cycleFrames;
-  const position = display.shown % cycle;
   const k = info.sourceBlocks;
-  const sweep = position < k;
-  els.cycleBar.style.width = `${(position / cycle) * 100}%`;
-  els.cycle.textContent = `${sweep ? "Systematic sweep" : "Repair frames"} ${(sweep ? position : position - k) + 1} / ${k} · carousel ${Math.floor(display.shown / cycle) + 1}`;
+  const sent = display.shown * info.layers;
+  const cycle = info.cycleFrames;
+  if (cycle) {
+    // v3: a carousel of k source and k repair frames, repeated.
+    const position = sent % cycle;
+    const sweep = position < k;
+    els.cycleBar.style.width = `${(position / cycle) * 100}%`;
+    els.cycle.textContent = `${sweep ? "Systematic sweep" : "Repair frames"} ${(sweep ? position : position - k) + 1} / ${k} · carousel ${Math.floor(sent / cycle) + 1}`;
+  } else {
+    // v4: one sweep of the source, then repair symbols that never repeat.
+    const sweep = sent < k;
+    els.cycleBar.style.width = `${Math.min(1, sent / k) * 100}%`;
+    els.cycle.textContent = sweep ? `Systematic sweep ${sent + 1} / ${k}`
+      : `Repair symbols · ${(sent - k + 1).toLocaleString()} sent, none repeated`;
+  }
   els.frames.textContent = display.shown.toLocaleString();
   const target = settings.fps * settings.codes;
   const actual = display.flipTimes.length;

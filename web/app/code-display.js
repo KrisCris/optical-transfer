@@ -8,6 +8,9 @@
 //  * With several codes on screen, cell j flips at phase j/N of the frame
 //    interval rather than all together, so a camera exposure straddling a
 //    flip loses at most one code instead of all of them.
+//  * A module byte's bits 0–2 say which of red, green and blue are dark there:
+//    7 is black and 0 white, so a plain code is painted exactly as before and
+//    a colour code (three codes, one per channel) needs nothing else.
 //  * Every cell that has come due flips on the same animation frame: deferring
 //    to one flip per frame would cap codes × fps at the display refresh rate.
 //    No cell flips twice in one frame, though: the first code would be painted
@@ -154,9 +157,11 @@ export class CodeDisplay {
     const frame = this.cells[index];
     const pixels = this.image.data;
     for (let module = 0; module < frame.length; module++) {
-      const shade = frame[module] ? 0 : 255;
+      const dark = frame[module];
       const offset = module * 4;
-      pixels[offset] = pixels[offset + 1] = pixels[offset + 2] = shade;
+      pixels[offset] = dark & 1 ? 0 : 255;
+      pixels[offset + 1] = dark & 2 ? 0 : 255;
+      pixels[offset + 2] = dark & 4 ? 0 : 255;
       pixels[offset + 3] = 255;
     }
     const x = (index % this.cols) * cell;

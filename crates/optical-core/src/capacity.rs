@@ -1,6 +1,9 @@
 //! How much payload a stream carries at a given frame size.
 //!
-//! The limit these functions describe is not [`MAX_FILE_BYTES`]. The frame
+//! Wire v4 has no block ceiling (RaptorQ symbol ids are 24 bits per block, up
+//! to 255 blocks), so everything below but [`block_length`] is about wire v3.
+//!
+//! The limit these functions describe is not [`V3_MAX_FILE_BYTES`]. The frame
 //! header numbers source blocks in a `u16`, so a large payload at a small
 //! bytes-per-frame runs out of block *numbers* long before it runs out of the
 //! file size limit: at 500 bytes per frame the real ceiling is about 30 MB, not
@@ -13,21 +16,26 @@
 //! length where a frame size belongs. That is a 22-byte error, silent, and it
 //! only shows up as an undecodable stream.
 
-use crate::{MAX_FILE_BYTES, protocol::HEADER_LEN};
+use crate::{
+    V3_MAX_FILE_BYTES,
+    protocol::{HEADER_LEN, Wire},
+};
 
 /// `k` is a `u16` in the frame header.
 pub const MAX_SOURCE_BLOCKS: usize = u16::MAX as usize;
 
-/// Payload bytes per frame, once the header has taken its cut.
+/// Payload bytes per frame, once `wire`'s header has taken its cut.
 ///
 /// `None` when the frame has no room left for a payload at all.
-pub fn block_length(frame_bytes: usize) -> Option<usize> {
-    frame_bytes.checked_sub(HEADER_LEN).filter(|len| *len > 0)
+pub fn block_length(frame_bytes: usize, wire: Wire) -> Option<usize> {
+    frame_bytes
+        .checked_sub(wire.header_len())
+        .filter(|len| *len > 0)
 }
 
-/// Source blocks a payload splits into at this frame size.
+/// Source blocks a payload splits into at this v3 frame size.
 pub fn source_block_count(payload_bytes: usize, frame_bytes: usize) -> Option<usize> {
-    Some(payload_bytes.div_ceil(block_length(frame_bytes)?))
+    Some(payload_bytes.div_ceil(block_length(frame_bytes, Wire::V3)?))
 }
 
 /// Can this payload be sent as one stream at this frame size?
@@ -37,10 +45,10 @@ pub fn fits_in_one_stream(payload_bytes: usize, frame_bytes: usize) -> bool {
 
 /// The smallest bytes-per-frame that can carry this payload at all.
 ///
-/// `None` only for a payload beyond [`MAX_FILE_BYTES`], which cannot be packed
-/// in the first place.
+/// `None` only for a payload beyond [`V3_MAX_FILE_BYTES`], which a v3 stream
+/// cannot carry in the first place.
 pub fn minimum_frame_bytes(payload_bytes: usize) -> Option<usize> {
-    if payload_bytes > MAX_FILE_BYTES {
+    if payload_bytes > V3_MAX_FILE_BYTES {
         return None;
     }
     Some(payload_bytes.div_ceil(MAX_SOURCE_BLOCKS) + HEADER_LEN)

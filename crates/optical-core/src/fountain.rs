@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
-use crate::{MAX_FILE_BYTES, OpticalError, protocol::SplitMix32};
+use crate::{OpticalError, V3_MAX_FILE_BYTES, protocol::SplitMix32};
 
 const LN2: f64 = std::f64::consts::LN_2;
 const SOLITON_C: f64 = 0.1;
@@ -179,7 +179,8 @@ pub struct LtEncoder {
 
 impl LtEncoder {
     pub fn new(payload: &[u8], block_len: usize, session_id: u16) -> Result<Self, OpticalError> {
-        if block_len == 0 || block_len > usize::from(u16::MAX) || payload.len() > MAX_FILE_BYTES {
+        if block_len == 0 || block_len > usize::from(u16::MAX) || payload.len() > V3_MAX_FILE_BYTES
+        {
             return Err(OpticalError::UnsupportedDimensions);
         }
         let k = payload.len().div_ceil(block_len).max(1);
@@ -293,7 +294,7 @@ impl LtDecoder {
             || block_len == 0
             || block_len > usize::from(u16::MAX)
             || total_len == 0
-            || total_len > MAX_FILE_BYTES
+            || total_len > V3_MAX_FILE_BYTES
             || total_len > capacity
             || total_len <= capacity - block_len
         {

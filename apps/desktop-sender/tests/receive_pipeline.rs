@@ -19,7 +19,7 @@ use std::{
 use desktop_sender::receive::{
     decoder::Decoder,
     session::Session,
-    synthetic::{Framing, camera_frame},
+    synthetic::{Framing, camera_frame, colour_frame},
     tracker::{Crop, Mode},
 };
 use optical_core::{
@@ -46,6 +46,7 @@ fn transfer(bytes: &[u8], codes: usize) -> Transfer {
         frames_per_second: 60,
         ecc: Ecc::Low,
         grid_codes: codes,
+        ..TransferSettings::default()
     };
     Transfer::from_file(
         "capture.bin",
@@ -91,7 +92,7 @@ fn rendered_frames_decode_through_zxing_into_a_verified_file() {
             w: frame.width,
             h: frame.height,
         };
-        let reply = decoder.decode(&frame.pixels, frame.width, frame.height, whole, true);
+        let reply = decoder.decode(&frame, whole, true);
         assert_eq!(reply.symbols.len(), 1, "frame {index} did not decode");
         let symbol = &reply.symbols[0];
         assert_eq!(
@@ -136,7 +137,7 @@ fn a_crop_decodes_and_reports_bounds_in_frame_coordinates() {
         w: 880,
         h: 840,
     };
-    let reply = decoder.decode(&frame.pixels, frame.width, frame.height, crop, false);
+    let reply = decoder.decode(&frame, crop, false);
     assert_eq!(reply.symbols.len(), 1);
     assert_eq!(reply.symbols[0].bytes, payload);
     let bounds = reply.symbols[0].bounds;
@@ -190,4 +191,67 @@ fn a_session_locks_onto_a_grid_and_receives_the_file() {
             core.stats
         );
     }
+}
+
+/// A colour code through a camera that mixes its channels and keeps colour
+/// at half resolution: found by a full scan, then read from crops, one
+/// symbol per layer either way.
+#[test]
+fn a_colour_code_is_unmixed_into_its_three_layers() {
+    let mut transfer = transfer(&noise(64 * 1024, 5), 1);
+    let mut renderer = transfer.renderer();
+    let payloads: Vec<Vec<u8>> = (0..3).map(|_| transfer.next_payload()).collect();
+    let layers: Vec<QrFrame> = payloads
+        .iter()
+        .map(|payload| renderer.render(payload).unwrap())
+        .collect();
+    // 185 modules at 4.6 px fill most of a 1280×960 picture's height.
+    let frame = colour_frame(&layers, framing(1, 1280, 960, 4.6, 1.5), 0.2);
+    let decoder = Decoder::new();
+    let whole = Crop {
+        x: 0,
+        y: 0,
+        w: frame.width,
+        h: frame.height,
+    };
+    let read = |reply: desktop_sender::receive::decoder::Reply| {
+        let mut bytes: Vec<Vec<u8>> = reply
+            .symbols
+            .iter()
+            .inspect(|symbol| assert!(symbol.colour))
+            .map(|symbol| symbol.bytes.clone())
+            .collect();
+        bytes.sort();
+        let mut expected = payloads.clone();
+        expected.sort();
+        assert_eq!(bytes, expected, "every layer, each once");
+    };
+    let scan = decoder.decode(&frame, whole, true);
+    assert!(scan.sightings.is_empty(), "the sighting became a decode");
+    read(scan);
+    let crop = Crop {
+        x: 160,
+        y: 0,
+        w: 960,
+        h: 960,
+    };
+    read(decoder.decode(&frame, crop, false));
+
+    // Without chroma the most a receiver gets is the layer luma favours:
+    // green, which Rec. 709 luma is seven tenths of.
+    let grey = desktop_sender::receive::camera::LumaFrame {
+        chroma: Vec::new(),
+        ..frame
+    };
+    let scan = decoder.decode(&grey, whole, true);
+    assert!(
+        scan.symbols.len() + scan.sightings.len() >= 1,
+        "the code is seen"
+    );
+    assert!(
+        scan.symbols
+            .iter()
+            .all(|symbol| !symbol.colour && symbol.bytes == payloads[1]),
+        "at most the green layer, read as an ordinary code"
+    );
 }

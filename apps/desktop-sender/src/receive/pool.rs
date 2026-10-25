@@ -61,14 +61,7 @@ impl DecodePool {
                     .spawn(move || {
                         let decoder = Decoder::new();
                         for job in inbox {
-                            let frame = &job.frame;
-                            let reply = decoder.decode(
-                                &frame.pixels,
-                                frame.width,
-                                frame.height,
-                                job.area,
-                                job.full,
-                            );
+                            let reply = decoder.decode(&job.frame, job.area, job.full);
                             // Free before reporting, so the frame that the
                             // report unblocks can already use this slot.
                             flag.store(false, Ordering::Release);

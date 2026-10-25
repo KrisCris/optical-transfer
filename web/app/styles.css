@@ -268,8 +268,9 @@ select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset:
 .file-list button { appearance: none; border: 0; background: none; color: var(--faint); cursor: pointer; font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
 .file-list button:hover { color: var(--danger); }
 
-.presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-@media (max-width: 480px) { .presets { grid-template-columns: repeat(2, 1fr); } }
+/* As many columns as the card holds, not the window: beside the stage on a
+   mid-sized window the card is narrow, and a preset's name must not overflow. */
+.presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 6px; }
 .presets label { display: block; cursor: pointer; color: var(--text); }
 .presets span { display: grid; gap: 2px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); height: 100%; }
 .presets b { font-size: 14px; }

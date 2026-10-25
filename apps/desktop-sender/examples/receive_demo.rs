@@ -69,6 +69,7 @@ fn main() -> eframe::Result<()> {
         frames_per_second: 60,
         ecc: Ecc::Low,
         grid_codes: 4,
+        ..TransferSettings::default()
     };
     let cameras = vec![CameraInfo {
         id: "synthetic".to_owned(),

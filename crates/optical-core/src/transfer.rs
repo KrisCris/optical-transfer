@@ -11,13 +11,14 @@
 use std::fmt;
 
 use crate::{
-    MAX_FILE_BYTES, OpticalError,
+    MAX_FILE_BYTES, OpticalError, V3_MAX_FILE_BYTES,
     capacity::{
         block_length, fits_in_one_stream, smallest_sufficient_frame_size, source_block_count,
     },
     container::{Compression, PackedFile, pack_file},
     fountain::{LtEncoder, cycle_length},
-    protocol::{FrameHeader, fnv1a, pack_frame},
+    protocol::{FrameHeader, FrameHeaderV4, Wire, fnv1a, pack_frame, pack_frame_v4},
+    raptor::RaptorEncoder,
     snippet::pack_snippet,
 };
 
@@ -56,6 +57,11 @@ pub struct TransferSettings {
     pub frames_per_second: u32,
     pub ecc: Ecc,
     pub grid_codes: usize,
+    /// The wire format. v4 unless someone needs upstream's receiver to read it.
+    pub wire: Wire,
+    /// Three frames per code, one in each of the red, green and blue channels.
+    /// See [`crate::qr::compose`].
+    pub color: bool,
 }
 
 impl Default for TransferSettings {
@@ -65,7 +71,22 @@ impl Default for TransferSettings {
             frames_per_second: DEFAULT_TX_FPS,
             ecc: Ecc::default(),
             grid_codes: 1,
+            wire: Wire::default(),
+            color: false,
         }
+    }
+}
+
+impl TransferSettings {
+    /// Frames each code on screen carries at once.
+    pub fn layers(&self) -> usize {
+        if self.color { 3 } else { 1 }
+    }
+
+    /// Payload bytes on the wire per second at these settings, before loss.
+    pub fn wire_rate(&self) -> f64 {
+        let payload = self.frame_bytes.saturating_sub(self.wire.header_len());
+        (self.frames_per_second as usize * self.grid_codes * self.layers() * payload) as f64
     }
 }
 
@@ -76,9 +97,20 @@ pub enum StartError {
     Empty,
     FileTooLarge {
         bytes: usize,
+        /// The limit for the chosen wire: upstream's v3 stops at 64 MiB.
+        limit: usize,
     },
-    /// The payload needs more source blocks than the frame header's `u16` can
+    /// The packed container is over what wire v3 carries. Upstream's 64 MiB
+    /// limits the container, the file is checked before packing, and a file
+    /// just under the limit packs into a container just over it. Wire v4
+    /// carries any container a permitted file makes.
+    ContainerTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    /// The payload needs more source blocks than a v3 frame header's `u16` can
     /// number. Reachable well under the file size limit at small frame sizes.
+    /// Wire v4 numbers symbols in 24 bits per block and has no such ceiling.
     TooManyBlocks {
         blocks: usize,
         frame_bytes: usize,
@@ -101,10 +133,17 @@ impl fmt::Display for StartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("There is nothing to send yet."),
-            Self::FileTooLarge { bytes } => write!(
+            Self::FileTooLarge { bytes, limit } => write!(
                 formatter,
                 "That file is {} and the limit is {}.",
                 human_bytes(*bytes),
+                human_bytes(*limit)
+            ),
+            Self::ContainerTooLarge { limit, .. } => write!(
+                formatter,
+                "With its name and checksum this comes to just over the {} wire v3 carries. \
+                 Choose wire v4, which carries up to {}.",
+                human_bytes(*limit),
                 human_bytes(MAX_FILE_BYTES)
             ),
             Self::TooManyBlocks {
@@ -142,11 +181,23 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
+/// The fountain behind a stream, in the wire format it was started with.
+enum Encoder {
+    V3 {
+        encoder: LtEncoder,
+        /// The header every frame shares but for `seq`.
+        header: FrameHeader,
+    },
+    V4 {
+        encoder: RaptorEncoder,
+        checksum: u32,
+    },
+}
+
 /// A running stream: the encoder, the header every frame shares, and a
 /// sequence number that only ever goes up.
 pub struct Transfer {
-    encoder: LtEncoder,
-    header: FrameHeader,
+    encoder: Encoder,
     next_seq: u32,
     settings: TransferSettings,
     compression: Compression,
@@ -162,13 +213,11 @@ impl fmt::Debug for Transfer {
         formatter
             .debug_struct("Transfer")
             .field("name", &self.name)
-            .field(
-                "session_id",
-                &format_args!("{:#06x}", self.header.session_id),
-            )
-            .field("source_blocks", &self.header.source_blocks)
-            .field("block_len", &self.header.block_len)
-            .field("total_len", &self.header.total_len)
+            .field("wire", &self.settings.wire)
+            .field("stream_id", &format_args!("{:#010x}", self.stream_id()))
+            .field("source_blocks", &self.source_blocks())
+            .field("block_len", &self.block_len())
+            .field("transmitted_size", &self.transmitted_size)
             .field("next_seq", &self.next_seq)
             .finish()
     }
@@ -186,10 +235,14 @@ impl Transfer {
             return Err(StartError::Empty);
         }
         // Before compression, deliberately: the limit is on the file the user
-        // chose, and making them wait through a 64 MiB gzip to be told no is a
-        // worse answer than the same answer given immediately.
-        if bytes.len() > MAX_FILE_BYTES {
-            return Err(StartError::FileTooLarge { bytes: bytes.len() });
+        // chose, and making them wait through a 128 MiB gzip to be told no is
+        // a worse answer than the same answer given immediately.
+        let limit = file_limit(settings.wire);
+        if bytes.len() > limit {
+            return Err(StartError::FileTooLarge {
+                bytes: bytes.len(),
+                limit,
+            });
         }
         let packed = pack_file(name, media_type, bytes).map_err(StartError::Packing)?;
         Self::from_packed(name.to_owned(), packed, settings, session_id)
@@ -213,15 +266,25 @@ impl Transfer {
         settings: TransferSettings,
         session_id: u16,
     ) -> Result<Self, StartError> {
-        let block_len = block_length(settings.frame_bytes).ok_or(StartError::InvalidFrameSize {
-            frame_bytes: settings.frame_bytes,
-        })?;
+        let block_len = block_length(settings.frame_bytes, settings.wire).ok_or(
+            StartError::InvalidFrameSize {
+                frame_bytes: settings.frame_bytes,
+            },
+        )?;
         let payload = &packed.container;
+
+        if settings.wire == Wire::V3 && payload.len() > V3_MAX_FILE_BYTES {
+            return Err(StartError::ContainerTooLarge {
+                bytes: payload.len(),
+                limit: V3_MAX_FILE_BYTES,
+            });
+        }
 
         // The block ceiling, checked against the container that will actually
         // be sent rather than the file the user picked — compression changes
-        // the answer, sometimes by enough to matter.
-        if !fits_in_one_stream(payload.len(), settings.frame_bytes) {
+        // the answer, sometimes by enough to matter. Only v3 numbers its
+        // blocks in 16 bits.
+        if settings.wire == Wire::V3 && !fits_in_one_stream(payload.len(), settings.frame_bytes) {
             return Err(StartError::TooManyBlocks {
                 blocks: source_block_count(payload.len(), settings.frame_bytes).unwrap_or(0),
                 frame_bytes: settings.frame_bytes,
@@ -242,28 +305,39 @@ impl Transfer {
         // The frame size is a ceiling, not a quota. Keep the block count the
         // ceiling implies and spread the payload evenly across it, so a short
         // text rides a small, coarse code instead of a padded version 40.
-        // Receivers take the block length from the header.
+        // Receivers take the block length from the header, or on v4 from the
+        // frame length.
         let blocks = payload.len().div_ceil(block_len).max(1);
         let block_len = payload.len().div_ceil(blocks).max(1);
 
-        let encoder =
-            LtEncoder::new(payload, block_len, session_id).map_err(StartError::Packing)?;
-        let header = FrameHeader {
-            session_id,
-            seq: 0,
-            source_blocks: encoder.source_blocks(),
-            block_len: block_len as u16,
-            total_len: payload.len() as u32,
-            payload_fnv: fnv1a(payload),
-            // No feature bits: this build sends plain wire v3. Spelled out
-            // rather than defaulted, so adding a flag is a decision made here
-            // and not an omission.
-            flags: 0,
+        let encoder = match settings.wire {
+            Wire::V3 => {
+                let encoder =
+                    LtEncoder::new(payload, block_len, session_id).map_err(StartError::Packing)?;
+                let header = FrameHeader {
+                    session_id,
+                    seq: 0,
+                    source_blocks: encoder.source_blocks(),
+                    block_len: block_len as u16,
+                    total_len: payload.len() as u32,
+                    payload_fnv: fnv1a(payload),
+                    // No feature bits: plain wire v3. Spelled out rather than
+                    // defaulted, so adding a flag is a decision made here and
+                    // not an omission.
+                    flags: 0,
+                };
+                Encoder::V3 { encoder, header }
+            }
+            // No session id on v4: the checksum names the stream, so the same
+            // file at the same settings is the same stream to a receiver.
+            Wire::V4 => Encoder::V4 {
+                encoder: RaptorEncoder::new(payload, block_len).map_err(StartError::Packing)?,
+                checksum: fnv1a(payload),
+            },
         };
 
         Ok(Self {
             encoder,
-            header,
             next_seq: 0,
             settings,
             compression: packed.compression,
@@ -277,9 +351,32 @@ impl Transfer {
     pub fn next_payload(&mut self) -> Vec<u8> {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
-        let block = self.encoder.encode(seq);
-        pack_frame(FrameHeader { seq, ..self.header }, &block)
-            .expect("dimensions were validated when the transfer started")
+        match &self.encoder {
+            Encoder::V3 { encoder, header } => {
+                pack_frame(FrameHeader { seq, ..*header }, &encoder.encode(seq))
+            }
+            Encoder::V4 { encoder, checksum } => {
+                let (block, symbol, bytes) = encoder.encode(seq);
+                pack_frame_v4(
+                    FrameHeaderV4 {
+                        flags: 0,
+                        checksum: *checksum,
+                        total_len: encoder.layout().total_len() as u32,
+                        block,
+                        symbol,
+                    },
+                    &bytes,
+                )
+            }
+        }
+        .expect("dimensions were validated when the transfer started")
+    }
+
+    /// The frames one code shows at once: one, or one per colour channel.
+    pub fn next_layers(&mut self) -> Vec<Vec<u8>> {
+        (0..self.settings.layers())
+            .map(|_| self.next_payload())
+            .collect()
     }
 
     pub fn renderer(&self) -> FrameRenderer {
@@ -294,33 +391,48 @@ impl Transfer {
         &self.name
     }
 
-    pub fn source_blocks(&self) -> u16 {
-        self.encoder.source_blocks()
+    pub fn wire(&self) -> Wire {
+        self.settings.wire
     }
 
+    /// Source blocks on v3; source symbols, across every RaptorQ block, on v4.
+    /// Either way, the frames one clean systematic sweep takes.
+    pub fn source_blocks(&self) -> u32 {
+        match &self.encoder {
+            Encoder::V3 { encoder, .. } => u32::from(encoder.source_blocks()),
+            Encoder::V4 { encoder, .. } => encoder.layout().symbols(),
+        }
+    }
+
+    /// Payload bytes per frame.
     pub fn block_len(&self) -> usize {
-        usize::from(self.header.block_len)
+        match &self.encoder {
+            Encoder::V3 { header, .. } => usize::from(header.block_len),
+            Encoder::V4 { encoder, .. } => encoder.layout().symbol_len(),
+        }
     }
 
-    pub fn session_id(&self) -> u16 {
-        self.header.session_id
+    /// What names the stream on the wire: v3's random session id, or v4's
+    /// container checksum.
+    pub fn stream_id(&self) -> u32 {
+        match &self.encoder {
+            Encoder::V3 { header, .. } => u32::from(header.session_id),
+            Encoder::V4 { checksum, .. } => *checksum,
+        }
     }
 
     pub fn sent_frames(&self) -> u32 {
         self.next_seq
     }
 
-    /// Frames in one carousel: a systematic sweep of every block, then an equal
-    /// run of repair frames for whatever the sweep dropped.
-    pub fn cycle_frames(&self) -> u32 {
-        cycle_length(self.encoder.source_blocks())
-    }
-
-    /// How many complete carousels have played. A receiver that catches one
-    /// clean sweep is done, so this is the honest unit of "how long has this
-    /// been up".
-    pub fn cycles_completed(&self) -> u32 {
-        self.next_seq / self.cycle_frames().max(1)
+    /// Frames in one v3 carousel: a systematic sweep of every block, then an
+    /// equal run of repair frames for whatever the sweep dropped. `None` on
+    /// v4, which sweeps once and then sends fresh repair symbols forever.
+    pub fn cycle_frames(&self) -> Option<u32> {
+        match &self.encoder {
+            Encoder::V3 { encoder, .. } => Some(cycle_length(encoder.source_blocks())),
+            Encoder::V4 { .. } => None,
+        }
     }
 
     pub fn compression(&self) -> Compression {
@@ -333,6 +445,14 @@ impl Transfer {
 
     pub fn transmitted_size(&self) -> usize {
         self.transmitted_size
+    }
+}
+
+/// The largest file a sender accepts for this wire.
+pub fn file_limit(wire: Wire) -> usize {
+    match wire {
+        Wire::V3 => V3_MAX_FILE_BYTES,
+        Wire::V4 => MAX_FILE_BYTES,
     }
 }
 

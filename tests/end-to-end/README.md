@@ -9,12 +9,17 @@ and single-code senders. Since then:
   every free worker used, camera-frame callbacks);
 - the decoder finishes with Gaussian elimination;
 - both senders show up to nine codes at a time, with staggered flips;
-- the default preset is *Fast*: 2953 bytes, 60 fps, one code.
+- the default preset is *Fast*: 2953 bytes, 60 fps, one code;
+- both senders send wire v4 (RaptorQ, `docs/wire-v4.md`) by default, and
+  every receiver reads v4 and upstream's v3;
+- a *Colour* preset stacks three codes in the red, green and blue channels.
 
 In the headless loopback benchmark (`scripts/loopback-bench.mjs`) the new
-receiver is 2.2× faster at one code and about 3× faster at four. That says
-nothing about a lens, so cases 9–11 below are the next runs to make, and the
-earlier numbers are the baseline to beat.
+receiver is 2.2× faster at one code and about 3× faster at four. v4 brings
+the frames needed per source block down to 1.00, from up to 1.59 at 1 MiB and
+up to 1.99 at 16 MiB on v3. Colour triples what one code carries. None of that says anything about a lens, so
+cases 9–16 below are the next runs to make, and the earlier numbers are the
+baseline to beat.
 
 ## Earlier results: text and first 1 MiB camera transfer verified
 
@@ -114,6 +119,11 @@ the frame size and the distance is not information anyone can act on.
 | 9 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary as case 2 | Fast (2953 B, 60 fps, 1 code) | not run |
 | 10 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Balanced and Max (2 and 4 codes) | not run |
 | 11 | web sender on a second screen | macOS desktop **Receive** mode, iPhone as Continuity Camera | 1 MiB binary | Fast, then Max | not run; see below |
+| 12 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Fast on v4, then Fast with *Wire format* set to v3, three runs each, alternating | not run |
+| 13 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Colour, with the code filling at least 80% of the camera view; capture rate 60, then 120 | not run |
+| 14 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Max on v4 | not run |
+| 15 | macOS arm64 desktop | iPhone 14 Plus Safari | 5 MiB and 16 MiB incompressible binaries | Max on v4, then Max on v3 | not run |
+| 16 | macOS arm64 desktop | iPhone 14 Plus Safari | 64 MiB, then 128 MiB, incompressible | Max on v4 | not run |
 
 Case 5 has a software analogue that passes
 (`a_receiver_joining_mid_carousel_still_completes`); the hardware version also
@@ -150,7 +160,7 @@ offers as a camera. It has its own procedure because the receiver is the Mac:
    *locked* once every code is tracked.
 5. Save the file when it verifies, compare hashes, and copy *Elapsed*, the
    *Avg / peak* rate and the rest of the Telemetry panel into the template. Repeat with
-   *Max* (4 codes).
+   *Max* (4 codes), then *Colour* with the code filling most of the preview.
 
 Record the camera line from Telemetry (it shows the negotiated size and frame
 rate): an iPhone's 60 fps formats are 1920×1440 and larger, which the app
@@ -169,6 +179,38 @@ that; how much is what this case measures.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Fast | | | | | | | |
 | 2 | Max | | | | | | | |
+| 3 | Colour | | | | | | | |
+
+The synthetic figure above was measured on wire v3, before v4. Run 3 tests
+colour on the desktop receiver, which unmixes the camera's own NV12 colour.
+
+## Cases 12–16: wire v4 and colour codes
+
+Telemetry's *Format* line says which wire is arriving, and adds `colour`
+while colour codes decode. Record it with every result.
+
+- **12** shows whether v4's lower overhead survives a lens. Telemetry's
+  *Overhead* should read 1.00 on v4. On v3 it varies from run to run, from
+  about 1.0 to 1.6. Compare elapsed times across the alternating runs, not
+  against older sessions.
+- **13** shows whether colour survives a real camera at all. If *Format* never
+  shows colour, or the rate stays near one code's (about 170 KiB/s), the
+  camera's colour processing beat the unmixing. Write down the distance, how
+  much of the view the code fills, the sending screen's brightness, and
+  whether True Tone or Night Shift was on. Then step closer before giving up.
+  The 120 fps capture run catches more of a 60 fps stream if the phone
+  delivers it; the *Camera* line says whether it did.
+- **14** is Max on v4, to compare with case 10.
+- **15** is for large files. In the loopback benchmark v3 needed 1.26–1.99
+  frames per block at 5–16 MiB, more as loss rose, while v4 stayed at 1.00.
+  Record *Overhead* and elapsed time for both.
+- **16** is about memory. The receiving tab holds about four times the file by
+  the end. Safari reloads a tab that runs out of memory, which looks like the
+  page starting over. Make the 128 MiB file exactly 128 MiB, the limit; both
+  senders accept it. The page decodes on its main thread, so expect it to
+  freeze for a few seconds as the last frames arrive: that is the three
+  RaptorQ blocks decoding. Record whether the file arrived, the elapsed time,
+  and how long that pause lasted.
 
 ## Recording template
 

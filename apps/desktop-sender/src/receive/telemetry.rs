@@ -366,6 +366,7 @@ mod tests {
 
     fn stats(solved: usize, unique: usize) -> ReceiverStats {
         ReceiverStats {
+            wire: 4,
             unique_frames: unique,
             duplicate_frames: 0,
             redundant_frames: 0,

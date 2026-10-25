@@ -6,18 +6,24 @@
 //! receiver asks a browser for — 1280×960 luma at 60 fps — so field numbers
 //! from either receiver mean the same thing.
 //!
-//! Only the luma plane is kept. A QR decoder binarises anyway, and taking the
-//! `Y` plane of the camera's native biplanar format costs one row copy per
-//! line rather than a colour conversion per pixel.
+//! Frames are kept in the camera's native biplanar layout, luma and the
+//! half-resolution chroma beside it, at one row copy per line and no colour
+//! conversion. A black and white code is decoded from luma alone; chroma is
+//! read only where a code has colour in it (see `unmix`).
 
 use std::sync::Arc;
 
-/// One camera frame: tightly packed 8-bit luma, row-major.
+/// One camera frame: tightly packed 8-bit luma, row-major, and the chroma
+/// that came with it.
 #[derive(Debug)]
 pub struct LumaFrame {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
+    /// 4:2:0 chroma as the camera sends it: a `Cb, Cr` pair per 2×2 block of
+    /// luma, `width.div_ceil(2)` pairs per row. Empty when there is none, and
+    /// then colour codes cannot be read.
+    pub chroma: Vec<u8>,
 }
 
 /// What a frame callback receives.
@@ -228,9 +234,9 @@ mod macos {
     };
     use objc2_core_media::{CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetDimensions};
     use objc2_core_video::{
-        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-        CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress,
-        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+        CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidthOfPlane,
+        CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     };
     use objc2_foundation::{
@@ -396,7 +402,7 @@ mod macos {
         }
     }
 
-    /// Copy the `Y` plane out of a biplanar frame, dropping row padding.
+    /// Copy both planes out of a biplanar frame, dropping row padding.
     fn luma_of(sample: &CMSampleBuffer) -> Option<LumaFrame> {
         let buffer = unsafe { sample.image_buffer() }?;
         // SAFETY: a CVPixelBuffer from a live sample buffer; unlocked below
@@ -420,10 +426,36 @@ mod macos {
                 width,
                 height,
                 pixels,
+                chroma: chroma_of(&buffer, width, height),
             }
         });
         unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::ReadOnly) };
         frame
+    }
+
+    /// Plane 1 of a locked biplanar buffer: interleaved `Cb, Cr` at half
+    /// resolution. Empty when the plane is missing or not that shape.
+    fn chroma_of(buffer: &CVPixelBuffer, width: usize, height: usize) -> Vec<u8> {
+        let (row_bytes, rows) = (width.div_ceil(2) * 2, height.div_ceil(2));
+        if CVPixelBufferGetPlaneCount(buffer) < 2
+            || CVPixelBufferGetWidthOfPlane(buffer, 1) * 2 != row_bytes
+            || CVPixelBufferGetHeightOfPlane(buffer, 1) != rows
+        {
+            return Vec::new();
+        }
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1);
+        let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 1).cast::<u8>();
+        if base.is_null() || stride < row_bytes {
+            return Vec::new();
+        }
+        // SAFETY: the caller holds the buffer locked, and plane 1 is `rows`
+        // rows of `stride` bytes starting at `base`.
+        let plane = unsafe { std::slice::from_raw_parts(base, stride * rows) };
+        let mut chroma = Vec::with_capacity(row_bytes * rows);
+        for row in plane.chunks_exact(stride) {
+            chroma.extend_from_slice(&row[..row_bytes]);
+        }
+        chroma
     }
 
     /// Open a camera — the one with this id, else the preferred one — and

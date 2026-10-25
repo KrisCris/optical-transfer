@@ -23,13 +23,15 @@ use std::{
 use eframe::egui::{Color32, ColorImage, vec2};
 use optical_core::{
     container::Compression,
+    qr::compose,
     transfer::{Transfer, TransferSettings},
 };
 
 /// Frames the worker may run ahead. Enough for three full nine-code grids.
 const AHEAD: usize = 27;
 
-/// A rendered frame, already in the texture's pixel format.
+/// A rendered code, already in the texture's pixel format: one frame, or
+/// three in a colour code.
 pub struct Frame {
     pub image: Arc<ColorImage>,
     /// Modules per side, quiet zone included.
@@ -43,10 +45,14 @@ pub struct Frame {
 pub struct StreamInfo {
     pub name: String,
     pub settings: TransferSettings,
-    pub session_id: u16,
-    pub source_blocks: u16,
+    /// v3's session id or v4's container checksum: what a receiver tells
+    /// streams apart by.
+    pub stream_id: u32,
+    /// Frames one clean systematic sweep takes: v3 blocks, v4 symbols.
+    pub source_blocks: u32,
     pub block_len: usize,
-    pub cycle_frames: u32,
+    /// v3's carousel length; `None` on v4, whose repair symbols never repeat.
+    pub cycle_frames: Option<u32>,
     pub compression: Compression,
     pub original_size: usize,
     pub transmitted_size: usize,
@@ -63,7 +69,7 @@ impl FrameSource {
         let info = StreamInfo {
             name: transfer.name().to_owned(),
             settings: transfer.settings(),
-            session_id: transfer.session_id(),
+            stream_id: transfer.stream_id(),
             source_blocks: transfer.source_blocks(),
             block_len: transfer.block_len(),
             cycle_frames: transfer.cycle_frames(),
@@ -74,14 +80,15 @@ impl FrameSource {
         let (sender, frames) = sync_channel(AHEAD);
         thread::spawn(move || {
             let mut renderer = transfer.renderer();
+            let layers = transfer.settings().layers();
             loop {
-                let payload = transfer.next_payload();
-                let frame = renderer
-                    .render(&payload)
-                    .map(|code| Frame {
-                        image: Arc::new(to_image(code.size, &code.pixels)),
-                        size: code.size,
-                        version: code.version,
+                let frame = (0..layers)
+                    .map(|_| renderer.render(&transfer.next_payload()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|codes| Frame {
+                        image: Arc::new(to_image(codes[0].size, &compose(&codes))),
+                        size: codes[0].size,
+                        version: codes[0].version,
                     })
                     .map_err(|error| format!("This frame could not be drawn: {error}."));
                 let failed = frame.is_err();
@@ -105,14 +112,23 @@ impl FrameSource {
     }
 }
 
-/// Pure black on pure white, one pixel per module. Scaling is the texture's
-/// job, and it is nearest-neighbour at an integer factor.
-fn to_image(size: usize, modules: &[bool]) -> ColorImage {
+/// One pixel per module, each channel black where its layer is dark (see
+/// [`compose`]): pure black on pure white for one layer, a colour code for
+/// three. Scaling is the texture's job, and it is nearest-neighbour at an
+/// integer factor.
+fn to_image(size: usize, modules: &[u8]) -> ColorImage {
+    let level = |dark: bool| if dark { 0 } else { 255 };
     ColorImage {
         size: [size, size],
         pixels: modules
             .iter()
-            .map(|&dark| if dark { Color32::BLACK } else { Color32::WHITE })
+            .map(|&bits| {
+                Color32::from_rgb(
+                    level(bits & 1 != 0),
+                    level(bits & 2 != 0),
+                    level(bits & 4 != 0),
+                )
+            })
             .collect(),
         source_size: vec2(size as f32, size as f32),
     }
@@ -126,8 +142,9 @@ pub struct FlipClock {
     sub_interval: Duration,
     next_at: Instant,
     cursor: usize,
-    /// Frames shown since the stream started, which is also the next frame's
-    /// sequence number: the worker produces them in order from zero.
+    /// Codes shown since the stream started. Times the frames in each code,
+    /// that is also the next frame's sequence number: the worker produces
+    /// them in order from zero.
     pub shown: u64,
     /// Times a frame was due and the worker had none ready.
     pub starved: u64,

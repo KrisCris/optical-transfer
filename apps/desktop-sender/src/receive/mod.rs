@@ -19,4 +19,6 @@ pub mod session;
 #[cfg(feature = "receive")]
 pub mod synthetic;
 #[cfg(feature = "receive")]
+pub mod unmix;
+#[cfg(feature = "receive")]
 pub mod view;

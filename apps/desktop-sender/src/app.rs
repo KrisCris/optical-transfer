@@ -31,7 +31,7 @@ use optical_core::{
     MAX_FILE_BYTES,
     bundle::{MAX_BUNDLE_FILES, SelectedFile},
     container::Compression,
-    protocol::HEADER_LEN,
+    protocol::Wire,
     qr::{Ecc, GRID_OPTIONS},
     snippet::MAX_SNIPPET_BYTES,
     transfer::{FRAME_BYTES_OPTIONS, TX_FPS_OPTIONS, TransferSettings, human_bytes},
@@ -48,38 +48,51 @@ const SECURITY_WARNING: &str = "Not encrypted";
 const SECURITY_DETAIL: &str = "Anyone with a camera pointed at this screen can read the transfer.";
 
 /// The browser sender's presets, so advice like "use Balanced" means the same
-/// numbers on both.
+/// numbers on both. They choose speed, not compatibility: the wire format
+/// stays as set.
 pub struct Preset {
     pub name: &'static str,
     pub frame_bytes: usize,
     pub fps: u32,
     pub codes: usize,
+    pub color: bool,
 }
 
-pub const PRESETS: [Preset; 4] = [
+pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "Reliable",
         frame_bytes: 1465,
         fps: 24,
         codes: 1,
+        color: false,
     },
     Preset {
         name: "Balanced",
         frame_bytes: 2331,
         fps: 30,
         codes: 2,
+        color: false,
     },
     Preset {
         name: "Fast",
         frame_bytes: 2953,
         fps: 60,
         codes: 1,
+        color: false,
+    },
+    Preset {
+        name: "Colour",
+        frame_bytes: 2953,
+        fps: 60,
+        codes: 1,
+        color: true,
     },
     Preset {
         name: "Max",
         frame_bytes: 2953,
         fps: 60,
         codes: 4,
+        color: false,
     },
 ];
 const DEFAULT_PRESET: usize = 2;
@@ -89,6 +102,7 @@ impl Preset {
         settings.frame_bytes == self.frame_bytes
             && settings.frames_per_second == self.fps
             && settings.grid_codes == self.codes
+            && settings.color == self.color
             && settings.ecc == Ecc::Low
     }
 
@@ -96,6 +110,7 @@ impl Preset {
         settings.frame_bytes = self.frame_bytes;
         settings.frames_per_second = self.fps;
         settings.grid_codes = self.codes;
+        settings.color = self.color;
         settings.ecc = Ecc::Low;
     }
 }
@@ -441,8 +456,13 @@ impl SenderApp {
         let size = std::fs::metadata(path)
             .map_err(|error| format!("{name} could not be read: {error}."))?
             .len() as usize;
+        // The larger, v4 limit: a v3 stream's lower one is enforced when it
+        // starts, so switching to v4 does not mean choosing the files again.
         if self.total_bytes() + size > MAX_FILE_BYTES {
-            return Err("That is over the 64 MiB limit, including ZIP overhead.".to_owned());
+            return Err(format!(
+                "That is over the {} MiB limit, including ZIP overhead.",
+                MAX_FILE_BYTES >> 20
+            ));
         }
         let bytes =
             std::fs::read(path).map_err(|error| format!("{name} could not be read: {error}."))?;
@@ -526,14 +546,19 @@ impl SenderApp {
         }
     }
 
-    /// Settings edited mid-stream: bytes per code and ECC are baked into every
-    /// frame and need a fresh stream; rate and grid only change the display.
+    /// Settings edited mid-stream: bytes per code, ECC, wire format and
+    /// colour are baked into every frame and need a fresh stream; rate and
+    /// grid only change the display.
     fn apply_live_settings(&mut self) {
         let Stage::Streaming(live) = &mut self.stage else {
             return;
         };
         let current = live.source.info.settings;
-        if current.frame_bytes != self.settings.frame_bytes || current.ecc != self.settings.ecc {
+        if current.frame_bytes != self.settings.frame_bytes
+            || current.ecc != self.settings.ecc
+            || current.wire != self.settings.wire
+            || current.color != self.settings.color
+        {
             self.start();
         } else if current.frames_per_second != self.settings.frames_per_second
             || current.grid_codes != self.settings.grid_codes
@@ -742,10 +767,7 @@ impl SenderApp {
         }
 
         ui.add_space(12.0);
-        let wire = f64::from(self.settings.frames_per_second)
-            * self.settings.grid_codes as f64
-            * (self.settings.frame_bytes - HEADER_LEN) as f64
-            / 1024.0;
+        let wire = self.settings.wire_rate() / 1024.0;
         theme::card(
             ui,
             "Speed",
@@ -846,7 +868,7 @@ impl SenderApp {
         painter.text(
             center + vec2(0.0, 12.0),
             egui::Align2::CENTER_CENTER,
-            "Folders too · several travel as one zip · 64 MiB",
+            "Folders too · several travel as one zip · 128 MiB",
             egui::FontId::proportional(theme::SMALL - 1.0),
             theme::TEXT_FAINT,
         );
@@ -951,13 +973,20 @@ impl SenderApp {
 
     fn draw_speed(&mut self, ui: &mut egui::Ui, locked: bool) {
         ui.add_enabled_ui(!locked, |ui| {
-            let width = (ui.available_width() - 8.0) / 2.0;
+            let full = ui.available_width();
             for pair in PRESETS.chunks(2) {
+                // An odd preset out takes the whole row.
+                let width = if pair.len() == 2 {
+                    (full - 8.0) / 2.0
+                } else {
+                    full
+                };
                 ui.horizontal(|ui| {
                     for preset in pair {
                         let detail = format!(
-                            "{} code{} · {} fps · {} B",
+                            "{} {}code{} · {} fps · {} B",
                             preset.codes,
+                            if preset.color { "colour " } else { "" },
                             if preset.codes == 1 { "" } else { "s" },
                             preset.fps,
                             preset.frame_bytes
@@ -1021,11 +1050,41 @@ impl SenderApp {
                             &Ecc::ALL,
                             |v| v.label().to_owned(),
                         );
+                        combo(
+                            ui,
+                            "Wire format",
+                            "wire",
+                            &mut settings.wire,
+                            &Wire::ALL,
+                            |v| match v {
+                                Wire::V4 => "v4 · RaptorQ".to_owned(),
+                                Wire::V3 => "v3 · upstream".to_owned(),
+                            },
+                        );
+                        combo(
+                            ui,
+                            "Colour",
+                            "color",
+                            &mut settings.color,
+                            &[false, true],
+                            |v| if v { "Red, green, blue" } else { "Off" }.to_owned(),
+                        );
                     });
                 ui.label(
                     RichText::new(
-                        "Bytes and error correction restart the stream. \
-                             Frame rate and code count change it live.",
+                        "Bytes, error correction, wire format and colour restart the \
+                             stream. Frame rate and code count change it live.",
+                    )
+                    .size(theme::SMALL - 0.5)
+                    .color(theme::TEXT_FAINT),
+                );
+                ui.label(
+                    RichText::new(
+                        "Colour stacks three codes in the red, green and blue channels: \
+                             three times the data per code, while the code fills most of \
+                             the camera's view. Wire v4 finishes from almost exactly the data \
+                             sent and carries up to 128 MiB; choose v3 only for an upstream \
+                             Decimen receiver, which reads neither v4 nor colour.",
                     )
                     .size(theme::SMALL - 0.5)
                     .color(theme::TEXT_FAINT),
@@ -1077,7 +1136,15 @@ impl SenderApp {
             Stage::Streaming(live) => Some(live.as_ref()),
             _ => None,
         };
-        let session = live.map(|live| format!("session {:04x}", live.source.info.session_id));
+        // v3 names a stream by its random session; v4 by the container
+        // checksum, so a restarted sender carries on a receiver's transfer.
+        let session = live.map(|live| {
+            let info = &live.source.info;
+            match info.settings.wire {
+                Wire::V3 => format!("v3 · session {:04x}", info.stream_id),
+                Wire::V4 => format!("v4 · stream {:08x}", info.stream_id),
+            }
+        });
         theme::card(
             ui,
             "Stream",
@@ -1105,7 +1172,7 @@ impl SenderApp {
                     "Payload",
                     "Compression",
                     "Code",
-                    "Blocks (k)",
+                    "Source (k)",
                     "Raw rate",
                     "Best case",
                     "Frames shown",
@@ -1180,24 +1247,42 @@ impl StreamStats {
         let info = &live.source.info;
         let settings = info.settings;
         let codes = live.cells.len();
+        let layers = settings.layers() as u64;
         let k = u64::from(info.source_blocks.max(1));
-        let cycle = u64::from(info.cycle_frames.max(1));
-        let position = live.clock.shown % cycle;
-        let carousel = live.clock.shown / cycle + 1;
-        let cycle_text = if position < k {
-            format!(
-                "Systematic sweep {} / {k} · carousel {carousel}",
-                position + 1
-            )
-        } else {
-            format!(
-                "Repair frames {} / {} · carousel {carousel}",
-                position - k + 1,
-                cycle - k
-            )
+        let sent = live.clock.shown * layers;
+        let (cycle_text, cycle_fraction) = match info.cycle_frames {
+            // v3: a carousel of k source and k repair frames, repeated.
+            Some(cycle) => {
+                let cycle = u64::from(cycle.max(1));
+                let position = sent % cycle;
+                let carousel = sent / cycle + 1;
+                let text = if position < k {
+                    format!(
+                        "Systematic sweep {} / {k} · carousel {carousel}",
+                        position + 1
+                    )
+                } else {
+                    format!(
+                        "Repair frames {} / {} · carousel {carousel}",
+                        position - k + 1,
+                        cycle - k
+                    )
+                };
+                (text, position as f32 / cycle as f32)
+            }
+            // v4: one sweep of the source, then repair symbols that never repeat.
+            None if sent < k => (
+                format!("Systematic sweep {} / {k}", sent + 1),
+                sent as f32 / k as f32,
+            ),
+            None => (
+                format!("Repair symbols · {} sent, none repeated", sent - k + 1),
+                1.0,
+            ),
         };
         let per_second = f64::from(settings.frames_per_second) * codes as f64;
-        let best = k as f64 / per_second;
+        let frames_per_second = per_second * layers as f64;
+        let best = k as f64 / frames_per_second;
         let target = per_second.round() as usize;
         let flips = live.clock.flip_rate();
         let slow = flips < target * 9 / 10 && live.clock.shown > target as u64;
@@ -1223,14 +1308,19 @@ impl StreamStats {
                 plain,
             ),
             (
-                format!("V{} ×{codes} · ECC {}", live.version, settings.ecc.label()),
+                format!(
+                    "V{} ×{codes}{} · ECC {}",
+                    live.version,
+                    if layers > 1 { " · colour" } else { "" },
+                    settings.ecc.label()
+                ),
                 plain,
             ),
             (format!("{k} × {} B", info.block_len), plain),
             (
                 format!(
                     "{} · {target} codes/s",
-                    format_rate(per_second * info.block_len as f64 / 1024.0)
+                    format_rate(frames_per_second * info.block_len as f64 / 1024.0)
                 ),
                 plain,
             ),
@@ -1259,7 +1349,7 @@ impl StreamStats {
         ];
         Self {
             cycle: cycle_text,
-            cycle_fraction: position as f32 / cycle as f32,
+            cycle_fraction,
             rows,
         }
     }

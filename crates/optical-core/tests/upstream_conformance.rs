@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use optical_core::{
     container::{Compression, unpack_file, verify_file},
     fountain::LtDecoder,
-    protocol::{FrameVerdict, classify_frame, fnv1a, parse_frame, stream_identity},
+    protocol::{FrameVerdict, Wire, classify_frame, fnv1a, parse_frame, stream_identity},
+    receiver::{ReceiverEvent, ReceiverState},
     snippet::{is_snippet, snippet_text},
 };
 
@@ -155,7 +156,7 @@ fn a_browser_written_lossy_frame_stream_decodes_to_the_same_text() {
     for frame in &case.frames {
         assert_eq!(
             classify_frame(frame),
-            FrameVerdict::Valid,
+            FrameVerdict::Valid(Wire::V3),
             "case {}: a frame packed by upstream must classify as ours",
             case.id
         );
@@ -212,4 +213,34 @@ fn a_browser_written_lossy_frame_stream_decodes_to_the_same_text() {
         snippet_text(&file).unwrap().as_bytes(),
         case.bytes("original")
     );
+}
+
+#[test]
+fn the_receiver_still_reads_an_upstream_stream_end_to_end() {
+    // This build's senders moved to wire v4; its receivers did not leave v3
+    // behind. The same upstream-written frames, through the state machine both
+    // the browser and the desktop receiver run.
+    let case = cases()
+        .into_iter()
+        .find(|case| case.id == "snippet-stream")
+        .expect("the streaming case is missing");
+    let mut receiver = ReceiverState::new();
+    for frame in &case.frames {
+        match receiver.add_frame(frame) {
+            ReceiverEvent::Progress { stats, .. } => assert_eq!(stats.wire, 3),
+            ReceiverEvent::Complete {
+                bytes,
+                is_text,
+                stats,
+                ..
+            } => {
+                assert_eq!(stats.wire, 3);
+                assert!(is_text);
+                assert_eq!(bytes, case.bytes("original"));
+                return;
+            }
+            other => panic!("case {}: unexpected {other:?}", case.id),
+        }
+    }
+    panic!("the upstream stream did not complete in the receiver");
 }

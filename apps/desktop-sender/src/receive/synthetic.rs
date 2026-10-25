@@ -18,7 +18,10 @@ use std::{
 
 use optical_core::{qr::QrFrame, transfer::Transfer};
 
-use crate::receive::camera::{FrameSink, LumaFrame, Negotiated};
+use crate::receive::{
+    camera::{FrameSink, LumaFrame, Negotiated},
+    unmix::to_420,
+};
 
 const DARK: f32 = 40.0;
 const LIGHT: f32 = 215.0;
@@ -39,6 +42,39 @@ pub struct Framing {
 
 /// Draw `codes` into a luma frame, each centred in its grid cell.
 pub fn camera_frame(codes: &[QrFrame], framing: Framing) -> LumaFrame {
+    let shades = render(codes, 1, framing);
+    LumaFrame {
+        width: framing.width,
+        height: framing.height,
+        pixels: shades.iter().map(|shade| shade[0] as u8).collect(),
+        chroma: Vec::new(),
+    }
+}
+
+/// Draw colour codes, three frames each (`compose`'s layers, in order), the
+/// way a camera delivers them: channels mixed by `crosstalk` (each keeps
+/// 1 − x of itself), then 4:2:0.
+pub fn colour_frame(frames: &[QrFrame], framing: Framing, crosstalk: f32) -> LumaFrame {
+    let x = crosstalk;
+    // Uneven, as overlapping filters are: green leaks most. Rows sum to one.
+    let mix = [
+        [1.0 - x, 0.75 * x, 0.25 * x],
+        [0.45 * x, 1.0 - x, 0.55 * x],
+        [0.15 * x, 0.85 * x, 1.0 - x],
+    ];
+    let shades = render(frames, 3, framing);
+    let rgb: Vec<[f32; 3]> = shades
+        .iter()
+        .map(|shade| std::array::from_fn(|c| (0..3).map(|k| mix[c][k] * shade[k]).sum()))
+        .collect();
+    to_420(framing.width, framing.height, &rgb)
+}
+
+/// `frames` in groups of `layers` per code, each code centred in its grid
+/// cell, as per-channel shades: channel c of a pixel is layer c of its code
+/// (all three the same for one layer).
+fn render(frames: &[QrFrame], layers: usize, framing: Framing) -> Vec<[f32; 3]> {
+    let codes: Vec<&[QrFrame]> = frames.chunks(layers.max(1)).collect();
     let Framing {
         width,
         height,
@@ -51,31 +87,32 @@ pub fn camera_frame(codes: &[QrFrame], framing: Framing) -> LumaFrame {
     let rows = codes.len().div_ceil(columns).max(1);
     let (cell_w, cell_h) = (width / columns, height / rows);
     let (sin, cos) = degrees.to_radians().sin_cos();
-    // The luma of one sample point, in whichever code's cell it falls.
-    let sample = |x: f32, y: f32| {
+    // The shade of one sample point, in whichever code's cell it falls.
+    let sample = |x: f32, y: f32| -> [f32; 3] {
         let (column, row) = ((x as usize) / cell_w.max(1), (y as usize) / cell_h.max(1));
         let Some(code) = codes
             .get(row * columns + column)
             .filter(|_| column < columns)
         else {
-            return LIGHT;
+            return [LIGHT; 3];
         };
         let center = (
             (column * cell_w) as f32 + cell_w as f32 / 2.0 + offset.0,
             (row * cell_h) as f32 + cell_h as f32 / 2.0 + offset.1,
         );
         let (dx, dy) = (x - center.0, y - center.1);
-        let half = code.size as f32 / 2.0;
+        let size = code[0].size;
+        let half = size as f32 / 2.0;
         let u = (cos * dx + sin * dy) / pitch + half;
         let v = (-sin * dx + cos * dy) / pitch + half;
-        let dark = u >= 0.0
-            && v >= 0.0
-            && (u as usize) < code.size
-            && (v as usize) < code.size
-            && code.pixels[v as usize * code.size + u as usize];
-        if dark { DARK } else { LIGHT }
+        let inside = u >= 0.0 && v >= 0.0 && (u as usize) < size && (v as usize) < size;
+        std::array::from_fn(|channel| {
+            let layer = &code[channel.min(code.len() - 1)];
+            let dark = inside && layer.pixels[v as usize * size + u as usize];
+            if dark { DARK } else { LIGHT }
+        })
     };
-    let mut pixels = vec![0_u8; width * height];
+    let mut pixels = vec![[0.0_f32; 3]; width * height];
     // Rendering is the slow part of a synthetic camera, so it is spread over
     // every core, a band of rows each; a real camera costs the receiver none
     // of this.
@@ -90,20 +127,19 @@ pub fn camera_frame(codes: &[QrFrame], framing: Framing) -> LumaFrame {
                     let (x, y) = ((offset % width) as f32, (first_row + offset / width) as f32);
                     // Four samples per pixel: module edges blur the way a
                     // lens blurs them.
-                    let sum: f32 = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
-                        .iter()
-                        .map(|(ox, oy)| sample(x + ox, y + oy))
-                        .sum();
-                    *pixel = (sum / 4.0) as u8;
+                    let mut sum = [0.0_f32; 3];
+                    for (ox, oy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                        let shade = sample(x + ox, y + oy);
+                        for channel in 0..3 {
+                            sum[channel] += shade[channel] / 4.0;
+                        }
+                    }
+                    *pixel = sum;
                 }
             });
         }
     });
-    LumaFrame {
-        width,
-        height,
-        pixels,
-    }
+    pixels
 }
 
 /// Stops the synthetic camera when dropped.
@@ -130,7 +166,8 @@ pub fn film(
 ) -> (Guard, Negotiated) {
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = Arc::clone(&stop);
-    let codes = transfer.settings().grid_codes.max(1);
+    let layers = transfer.settings().layers();
+    let codes = transfer.settings().grid_codes.max(1) * layers;
     let thread = thread::spawn(move || {
         let mut renderer = transfer.renderer();
         let period = Duration::from_secs_f64(1.0 / fps);
@@ -151,7 +188,11 @@ pub fn film(
                     degrees: framing.degrees + 0.4 * (t * 0.5).sin(),
                     ..framing
                 };
-                sink(Arc::new(camera_frame(&frames, drift)));
+                sink(Arc::new(if layers > 1 {
+                    colour_frame(&frames, drift, 0.15)
+                } else {
+                    camera_frame(&frames, drift)
+                }));
             }
             let due = started + period.mul_f64(index as f64);
             if let Some(wait) = due.checked_duration_since(Instant::now()) {

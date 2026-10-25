@@ -3,8 +3,11 @@ use optical_core::{
     MAX_FILE_BYTES,
     bundle::{MAX_BUNDLE_FILES, SelectedFile, bundle_files},
     container::Compression,
-    qr::{Ecc, FrameRenderer, QrFrame},
-    transfer::{FRAME_BYTES_OPTIONS, TX_FPS_OPTIONS, Transfer, TransferSettings},
+    protocol::Wire,
+    qr::{Ecc, FrameRenderer, QrFrame, compose},
+    transfer::{
+        FRAME_BYTES_OPTIONS, TX_FPS_OPTIONS, Transfer, TransferSettings, file_limit, human_bytes,
+    },
 };
 use serde::Serialize;
 
@@ -15,13 +18,34 @@ pub struct SenderInfo {
     pub file_count: usize,
     pub original_bytes: usize,
     pub transmitted_bytes: usize,
-    pub source_blocks: u16,
+    /// Frames one clean systematic sweep takes: v3 blocks, v4 symbols.
+    pub source_blocks: u32,
     pub block_len: usize,
-    pub cycle_frames: u32,
+    /// v3's carousel length; `null` on v4, which never repeats itself.
+    pub cycle_frames: Option<u32>,
     pub compressed: bool,
-    pub session_id: u16,
+    /// v3's session id or v4's container checksum.
+    pub stream_id: u32,
+    pub wire: u8,
+    /// Frames per code: 1, or 3 for a colour code.
+    pub layers: usize,
     pub qr_size: usize,
     pub qr_version: u8,
+}
+
+/// What the sender was asked for, as the browser's controls pass it.
+#[derive(Clone, Copy, Debug)]
+pub struct SendOptions<'a> {
+    pub frame_bytes: usize,
+    pub fps: u32,
+    /// "L", "M", "Q" or "H".
+    pub ecc: &'a str,
+    /// v3's stream identity; v4 ignores it.
+    pub session_id: u16,
+    /// 4 for this build's wire, 3 for upstream's.
+    pub wire: u8,
+    /// Three frames per code, one per colour channel.
+    pub color: bool,
 }
 
 struct ActiveSender {
@@ -74,9 +98,10 @@ impl SenderState {
             .checked_add(bytes.len())
             .ok_or("Selection is too large.")?;
         if total > MAX_FILE_BYTES {
-            return Err(
-                "Choose fewer files: the total limit is 64 MiB, including ZIP overhead.".into(),
-            );
+            return Err(format!(
+                "Choose fewer files: the total limit is {}, including ZIP overhead.",
+                human_bytes(MAX_FILE_BYTES)
+            ));
         }
         if name.len() > usize::from(u16::MAX)
             || media_type.len() > usize::from(u16::MAX)
@@ -94,14 +119,15 @@ impl SenderState {
         Ok(())
     }
 
-    pub fn prepare_files(
-        &mut self,
-        frame_bytes: usize,
-        fps: u32,
-        ecc: &str,
-        session_id: u16,
-    ) -> Result<SenderInfo, String> {
-        let settings = settings(frame_bytes, fps, ecc)?;
+    pub fn prepare_files(&mut self, options: SendOptions<'_>) -> Result<SenderInfo, String> {
+        let settings = settings(options)?;
+        // The selection limit is v4's; a v3 stream has upstream's lower one.
+        if self.total_bytes > file_limit(settings.wire) {
+            return Err(format!(
+                "Wire v3 carries at most {}. Choose fewer files or send as v4.",
+                human_bytes(file_limit(settings.wire))
+            ));
+        }
         let count = self.files.len();
         let files = std::mem::take(&mut self.files);
         self.total_bytes = 0;
@@ -111,7 +137,7 @@ impl SenderState {
             &file.media_type,
             &file.bytes,
             settings,
-            session_id,
+            options.session_id,
         )
         .map_err(|error| error.to_string())?;
         self.activate(transfer, count)
@@ -120,14 +146,11 @@ impl SenderState {
     pub fn prepare_text(
         &mut self,
         text: &str,
-        frame_bytes: usize,
-        fps: u32,
-        ecc: &str,
-        session_id: u16,
+        options: SendOptions<'_>,
     ) -> Result<SenderInfo, String> {
-        let settings = settings(frame_bytes, fps, ecc)?;
-        let transfer =
-            Transfer::from_text(text, settings, session_id).map_err(|error| error.to_string())?;
+        let settings = settings(options)?;
+        let transfer = Transfer::from_text(text, settings, options.session_id)
+            .map_err(|error| error.to_string())?;
         self.files.clear();
         self.total_bytes = 0;
         self.activate(transfer, 0)
@@ -151,7 +174,9 @@ impl SenderState {
             block_len: transfer.block_len(),
             cycle_frames: transfer.cycle_frames(),
             compressed: transfer.compression() == Compression::Gzip,
-            session_id: transfer.session_id(),
+            stream_id: transfer.stream_id(),
+            wire: transfer.wire().version(),
+            layers: transfer.settings().layers(),
             qr_size: first.size,
             qr_version: first.version,
         };
@@ -177,19 +202,43 @@ impl SenderState {
             .map_err(|error| error.to_string())
     }
 
-    /// `count` frames' modules back to back, one byte per module (1 is dark),
-    /// so a browser worker crosses the WebAssembly boundary once per batch.
+    /// The next code on screen: one frame, or three in a colour code, as
+    /// [`compose`] lays them out.
+    pub fn next_code(&mut self) -> Result<Vec<u8>, String> {
+        let layers = self
+            .active
+            .as_ref()
+            .ok_or("Choose files or text and start sending first.")?
+            .transfer
+            .settings()
+            .layers();
+        let frames = (0..layers)
+            .map(|_| self.next_frame())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(compose(&frames))
+    }
+
+    /// `count` codes' modules back to back, one byte per module whose bits are
+    /// the dark channels (7 is black), so a browser worker crosses the
+    /// WebAssembly boundary once per batch.
     pub fn next_frames(&mut self, count: usize) -> Result<Vec<u8>, String> {
         let mut modules = Vec::new();
         for _ in 0..count {
-            let frame = self.next_frame()?;
-            modules.extend(frame.pixels.into_iter().map(u8::from));
+            modules.extend(self.next_code()?);
         }
         Ok(modules)
     }
 }
 
-fn settings(frame_bytes: usize, fps: u32, ecc: &str) -> Result<TransferSettings, String> {
+fn settings(options: SendOptions<'_>) -> Result<TransferSettings, String> {
+    let SendOptions {
+        frame_bytes,
+        fps,
+        ecc,
+        wire,
+        color,
+        ..
+    } = options;
     if !FRAME_BYTES_OPTIONS.contains(&frame_bytes) {
         return Err("Choose a frame size from the offered settings.".into());
     }
@@ -203,10 +252,16 @@ fn settings(frame_bytes: usize, fps: u32, ecc: &str) -> Result<TransferSettings,
         "H" => Ecc::High,
         _ => return Err("Choose error correction L, M, Q, or H.".into()),
     };
+    let wire = Wire::ALL
+        .into_iter()
+        .find(|candidate| candidate.version() == wire)
+        .ok_or("Choose wire format v4 or v3.")?;
     Ok(TransferSettings {
         frame_bytes,
         frames_per_second: fps,
         ecc,
         grid_codes: 1,
+        wire,
+        color,
     })
 }

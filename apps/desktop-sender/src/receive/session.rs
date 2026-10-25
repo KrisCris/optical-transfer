@@ -58,6 +58,8 @@ pub struct Core {
     pub finished: bool,
     /// Session milliseconds of the last frame the receiver accepted.
     pub last_accepted: Option<f64>,
+    /// Session milliseconds of the last code read from a colour layer.
+    pub last_colour: Option<f64>,
     /// The newest camera frame, for the viewfinder.
     pub preview: Option<Arc<LumaFrame>>,
     /// Bumped on every new preview frame.
@@ -123,6 +125,9 @@ impl Core {
         }
         for symbol in reply.symbols {
             self.tracker.note_decoded(symbol.bounds, now);
+            if symbol.colour {
+                self.last_colour = Some(now);
+            }
             if !self.completed() {
                 self.frame(&symbol.bytes, done.captured_at, now);
             }
@@ -227,6 +232,7 @@ impl Session {
                 result: None,
                 finished: false,
                 last_accepted: None,
+                last_colour: None,
                 preview: None,
                 preview_serial: 0,
             }),

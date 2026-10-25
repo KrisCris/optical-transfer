@@ -13,12 +13,12 @@ self.onmessage = async ({ data }) => {
     if (data.type === "prepare") {
       sender?.free();
       sender = new WasmSender();
-      const { frameBytes, fps, ecc } = data.settings;
+      const { frameBytes, fps, ecc, wire, color } = data.settings;
       const session = new Uint16Array(1);
       do crypto.getRandomValues(session); while (session[0] === 0);
       let info;
       if (data.kind === "text") {
-        info = sender.prepareText(data.text, frameBytes, fps, ecc, session[0]);
+        info = sender.prepareText(data.text, frameBytes, fps, ecc, session[0], wire, color);
       } else {
         for (const [index, file] of data.files.entries()) {
           self.postMessage({ type: "progress", message: `Reading ${index + 1} of ${data.files.length}: ${file.name}` });
@@ -28,7 +28,7 @@ self.onmessage = async ({ data }) => {
           else sender.addFile(file.name, file.type, bytes);
         }
         self.postMessage({ type: "progress", message: "Compressing and hashing…" });
-        info = sender.prepareFiles(frameBytes, fps, ecc, session[0]);
+        info = sender.prepareFiles(frameBytes, fps, ecc, session[0], wire, color);
       }
       frameSize = info.qrSize * info.qrSize;
       self.postMessage({ type: "ready", info });
