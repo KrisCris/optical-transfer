@@ -124,11 +124,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    dirty = bool(git("status", "--porcelain"))
+    changes = git("status", "--porcelain")
+    dirty = bool(changes)
     if dirty and not args.allow_dirty:
         print(
             "the working tree has uncommitted changes, so SOURCE.txt could not\n"
-            "honestly name the source for this build. Commit, or pass --allow-dirty.",
+            "honestly name the source for this build. Commit, or pass --allow-dirty.\n"
+            f"{changes}",
             file=sys.stderr,
         )
         return 1

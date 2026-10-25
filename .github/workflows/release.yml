@@ -57,6 +57,13 @@ jobs:
           - { os: macos-15, target: aarch64-apple-darwin }
           - { os: macos-15-intel, target: x86_64-apple-darwin }
     steps:
+      # Windows runners check text out as CRLF. The web bundle downloaded below
+      # is LF, built on Linux, and lands on top of the tracked copies; check out
+      # LF so the tree still matches what SOURCE.txt names.
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v4
 
       # The arm64 Linux and Windows images do not all carry rustup.
@@ -66,8 +73,11 @@ jobs:
           command -v rustup >/dev/null && exit 0
           if [ "${{ runner.os }}" = Windows ]; then
             arch=x86_64; [ "${{ runner.arch }}" = ARM64 ] && arch=aarch64
-            curl -sSfL -o rustup-init.exe "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe"
-            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            # Into the runner's temp directory, not the checkout, which has to
+            # stay clean for packaging.
+            installer="$RUNNER_TEMP/rustup-init.exe"
+            curl -sSfL -o "$installer" "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe"
+            "$installer" -y --default-toolchain none --profile minimal
             echo "$USERPROFILE\\.cargo\\bin" >> "$GITHUB_PATH"
           else
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
