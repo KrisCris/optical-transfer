@@ -80,9 +80,11 @@ pub const PRESETS: [Preset; 5] = [
         codes: 1,
         color: false,
     },
+    // A camera keeps colour coarser than brightness, so a colour code needs
+    // larger modules than a black and white one: version 27, not 40.
     Preset {
         name: "Colour",
-        frame_bytes: 2953,
+        frame_bytes: 1465,
         fps: 60,
         codes: 1,
         color: true,
@@ -1080,9 +1082,11 @@ impl SenderApp {
                 );
                 ui.label(
                     RichText::new(
-                        "Colour stacks three codes in the red, green and blue channels: \
-                             three times the data per code, while the code fills most of \
-                             the camera's view. Wire v4 finishes from almost exactly the data \
+                        "Colour stacks three codes in the red, green and blue channels. \
+                             Cameras keep colour coarser than brightness, so the Colour \
+                             preset uses larger modules (1465 bytes a layer) and still \
+                             carries half again what Fast does; denser colour codes only \
+                             read while the code fills most of the camera's view. Wire v4 finishes from almost exactly the data \
                              sent and carries up to 128 MiB; choose v3 only for an upstream \
                              Decimen receiver, which reads neither v4 nor colour.",
                     )

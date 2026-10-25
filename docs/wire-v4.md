@@ -133,7 +133,15 @@ statistics:
    transform nearest the identity. That keeps each layer in its own channel
    and dark modules dark, with no calibration and no pilot symbols.
 4. Write each whitened channel as grey (128 + 60 per standard deviation) and
-   read it as an ordinary QR code.
+   read it as an ordinary QR code, green first. Green is most of luma, so it
+   keeps the most detail through the camera's coarse colour, and where it
+   reads, red and blue are read at its position: the web worker's tracked
+   path from green's quad, and no full reread of a layer that missed there.
+5. A layer that misses is sharpened and read again: each pixel moves 1.2
+   times its difference from the mean of a box about two modules wide, at
+   the module pitch the code was found or read at. Coarse chroma pulls a lone
+   light module among dark ones dark; this pushes it back. Only a layer that
+   missed pays for it, about as much as unmixing it did.
 
 A crop around a known code is checked for colour first. A black and white
 crop, or a colour one whose layers do not read, goes on to the brightness
@@ -145,17 +153,32 @@ worker unmixes the canvas's RGBA (`web/app/unmix.js`). The desktop receiver
 converts the camera's NV12 chroma plane with BT.709 coefficients
 (`receive/unmix.rs`).
 
-Colour needs larger modules than black and white: about 4 camera pixels per
-module with 4:2:0 video, against 2.2. At the 1280×960 both receivers capture,
-that is one version 40 code filling most of the view. Four black and white
-codes fit the same view at about 2.2 pixels per module. Per camera pixel the two
-carry about the same, because 4:2:0 keeps colour at a quarter of the
-resolution, and in the loopback benchmark four black and white codes stay
-ahead of one colour code. Colour also costs the web worker about six times as
-much per crop as black and white, or twice as much per frame read. It would
-pull ahead with full-resolution colour, or at a capture size where two colour
-codes fit at 4 pixels per module. Whether a real camera's colour processing
-leaves it working at all is the open question.
+Colour needs larger modules than black and white. 4:2:0 alone keeps colour at
+half resolution, and a phone's colour noise reduction smears it further. The
+first real camera, an iPhone receiving in Safari at 1280 pixels, settled
+what the loopback benchmark could not. Version 40 colour codes read nothing
+from a laptop screen, where the code was about 2.8 camera pixels per module,
+and only slowly from a 27-inch monitor. `scripts/colour-camera.mjs` reproduces
+both once chroma is smeared by a Gaussian of about 1 pixel on top of 4:2:0
+(`cblur=1`): nothing at 2.8 pixels per module, and at 3.4 only green, 0.88
+codes per frame, with the receiver as it was then. The *Colour* preset
+therefore uses version 27 codes. With green first and sharpening, the same
+model gives, per camera frame (1280×720, blur σ 1 px, 24 frames):
+
+| Code, pixels per module | Reads per frame | Bytes per frame | Web worker per crop |
+| --- | --- | --- | --- |
+| black and white v40, 2.8 | 1.00 | 2937 | 4.8 ms |
+| colour v40, 2.8 | 0 | 0 | — |
+| colour v27, 3.9 | 3.00 | 4347 | 12.2 ms |
+| colour v40, 3.4 | 2.83 | 8322 | 35.6 ms |
+| colour v27, 4.7 | 3.00 | 4347 | 14.6 ms |
+
+At `cblur=2` version 27 keeps green, and red where the code is large, so it
+degrades to one or two layers rather than to nothing. Version
+40 colour is worth choosing in *Fine-tune* only when the code fills most of
+the camera's view. Four black and white codes, at about 2.2 pixels per
+module in the same view, still carry the most when the camera is steady
+enough for them.
 
 ## Limits
 
@@ -252,7 +275,9 @@ finished in 23.8 and 24.8 s, against 31.9–34.3 s for one black and white v4
 code.
 
 In the web worker a colour crop took 16–20 ms at one code (all three layers
-unmixed and read), against 2.5–3 ms for a black and white crop.
+unmixed and read), against 2.5–3 ms for a black and white crop. At the
+*Colour* preset's 1465 bytes the loopback benchmark ran at 249 and 252 KiB/s
+of the 255 on the wire, catching 97–99% of frames, with crops at 10–11 ms.
 
 The coding itself, natively, with this crate's `RaptorEncoder` and
 `RaptorDecoder`, best of three on the same machine: at 50% loss a block of
@@ -272,8 +297,9 @@ matters on phones.
 
 ## What is not verified
 
-No v4 or colour transfer has been through a real lens yet. The loopback
-camera models blur, contrast loss, linear crosstalk, 4:2:0 chroma and noise.
-It does not model a phone's white balance and saturation, a screen's gamut,
-glare, moiré, or rolling shutter, and these decide whether colour works
-outside the benchmark. `tests/end-to-end/README.md` lists the runs to make.
+Colour has met one real camera, an iPhone, only with version 40 codes and
+the receiver before green-first reading and sharpening; the *Colour* preset's
+version 27 codes have not. The loopback camera models blur, contrast loss,
+linear crosstalk, 4:2:0 chroma and noise, and `scripts/colour-camera.mjs`
+adds a phone's further colour smear. Neither models a phone's white balance
+and saturation, a screen's gamut, glare, moiré, or rolling shutter. `tests/end-to-end/README.md` lists the runs to make.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { eigen3, unmixing, writeLayer } from "../unmix.js";
+import { eigen3, sharpenLayer, unmixing, writeLayer } from "../unmix.js";
 
 /** xorshift32, so every run sees the same picture. */
 function random(seed) {
@@ -97,4 +97,71 @@ test("statistics from the code's area unmix the whole crop around it", () => {
     if (within(index) && (out[index * 4] < 128) !== layers[2][index]) wrong++;
   }
   assert.ok(wrong < 8, `${wrong} modules misread`);
+});
+
+/** A `cells`² grid of random modules, `pitch` pixels each, as a layer's grey
+ *  RGBA words, smeared by a Gaussian of `sigma` pixels the way coarse camera
+ *  colour smears an unmixed layer. Returns the words and the modules. */
+function smeared(cells, pitch, sigma, next) {
+  const side = cells * pitch;
+  const modules = Array.from({ length: cells * cells }, () => next() < 0.5);
+  const level = (x, y) => (modules[Math.floor(y / pitch) * cells + Math.floor(x / pitch)] ? 68 : 188);
+  const radius = Math.ceil(sigma * 3);
+  const kernel = Array.from({ length: 2 * radius + 1 }, (_, i) => Math.exp(-((i - radius) ** 2) / (2 * sigma * sigma)));
+  const total = kernel.reduce((a, b) => a + b, 0);
+  const clampTo = (value) => Math.min(side - 1, Math.max(0, value));
+  const across = new Float32Array(side * side);
+  for (let y = 0; y < side; y++) {
+    for (let x = 0; x < side; x++) {
+      let sum = 0;
+      for (let k = -radius; k <= radius; k++) sum += kernel[k + radius] * level(clampTo(x + k), y);
+      across[y * side + x] = sum / total;
+    }
+  }
+  const words = new Uint32Array(side * side);
+  for (let y = 0; y < side; y++) {
+    for (let x = 0; x < side; x++) {
+      let sum = 0;
+      for (let k = -radius; k <= radius; k++) sum += kernel[k + radius] * across[clampTo(y + k) * side + x];
+      const grey = Math.round(sum / total);
+      words[y * side + x] = 0xff000000 | (grey * 0x010101);
+    }
+  }
+  return { words, modules, side };
+}
+
+/** Modules whose centre pixel reads the wrong side of mid-grey. */
+function misread(words, modules, cells, pitch) {
+  const side = cells * pitch;
+  let wrong = 0;
+  for (let row = 0; row < cells; row++) {
+    for (let column = 0; column < cells; column++) {
+      const centre = (row * pitch + pitch / 2) * side + column * pitch + pitch / 2;
+      if (((words[centre] & 0xff) < 128) !== modules[row * cells + column]) wrong++;
+    }
+  }
+  return wrong;
+}
+
+test("sharpening at the module pitch reads back modules coarse colour smeared together", () => {
+  const next = random(23);
+  const cells = 48;
+  const pitch = 4;
+  const { words, modules, side } = smeared(cells, pitch, 2.2, next);
+  const before = misread(words, modules, cells, pitch);
+  sharpenLayer(words, side, side, pitch);
+  const after = misread(words, modules, cells, pitch);
+  for (const word of words) {
+    assert.equal((word >>> 8) & 0xff, word & 0xff, "the output is grey");
+    assert.equal(word >>> 24, 0xff, "and opaque");
+  }
+  assert.ok(before > cells * cells * 0.04, `the smear alone misreads ${before} modules`);
+  assert.ok(after < before / 10, `sharpened, ${after} of ${before} misread modules remain`);
+});
+
+test("sharpening leaves an even layer even", () => {
+  const side = 40;
+  const words = new Uint32Array(side * side).fill(0xff000000 | (150 * 0x010101));
+  sharpenLayer(words, side, side, 5);
+  assert.ok(words.every((word) => word === (0xff000000 | (150 * 0x010101)) >>> 0));
 });

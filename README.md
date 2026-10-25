@@ -57,7 +57,7 @@ development headers; `.github/workflows/ci.yml` has the exact package list.
 
 ```sh
 cargo test --workspace                 # both wires, both fountains, both ends
-node --test web/app/tests/*.test.mjs   # capture scheduler, telemetry, flip clock, colour unmixing
+node --test web/app/tests/*.test.mjs   # capture scheduler, telemetry, flip clock, colour unmixing and sharpening
 ./scripts/build-web.sh                 # wasm, vendor and static checks
 cargo run -p desktop-sender --release  # or: … -- report.pdf photos/
 cargo run -p desktop-sender --release --features receive  # macOS, adds Receive
@@ -73,12 +73,17 @@ default:
 | Reliable | 1 | 24 | 1465 | 34 KiB/s |
 | Balanced | 2 | 30 | 2331 | 136 KiB/s |
 | Fast | 1 | 60 | 2953 | 172 KiB/s |
-| Colour | 1, ×3 layers | 60 | 2953 | 516 KiB/s |
+| Colour | 1, ×3 layers | 60 | 1465 | 255 KiB/s |
 | Max | 4 | 60 | 2953 | 688 KiB/s |
 
-*Colour* puts three codes in one, in the red, green and blue channels. It only
-pays while the code fills most of the camera's view, and has yet to meet a real
-camera (see [docs/wire-v4.md](docs/wire-v4.md)).
+*Colour* puts three codes in one, in the red, green and blue channels. A
+camera keeps colour coarser than brightness, so colour codes need larger
+modules than black and white ones: the preset uses version 27 codes (1465
+bytes a layer) and carries half again what *Fast* does. On an iPhone, version
+40 colour codes did not read at all from a laptop screen and read only their
+green layer from a 27-inch monitor (see [docs/wire-v4.md](docs/wire-v4.md)).
+Where the code fills most of the view, *Fine-tune* can raise colour's bytes
+per code.
 
 *Fine-tune* sets each value directly. That includes the error-correction
 level, 120 fps for a display that refreshes at least that fast, colour, and
@@ -152,7 +157,8 @@ recovered data rate and a map with one pixel per source block (per source
 symbol on v4), lit as each is recovered. Telemetry splits into the stream:
 
 - payload and block dimensions
-- the format: wire version, and colour while colour codes are arriving
+- the format: wire version, and while colour codes are arriving, which of
+  their red, green and blue layers are reading
 - unique, duplicate and redundant frames
 - on v3, equations parked for the solver and eliminations run; on v4, repair
   symbols held and decode attempts
@@ -183,9 +189,11 @@ frozen stream otherwise looks like a receiver failure.
 
 **If it is not picking anything up.** Fill about half the camera view with the
 code, hold still, turn the sending screen's brightness up, and step down a
-preset. Fewer, larger, slower codes beat dense fast ones. *Colour* needs the
-code to fill most of the view; if the receiver's Format line never says
-colour, use *Max* instead.
+preset. Fewer, larger, slower codes beat dense fast ones. With *Colour*, the
+receiver's Format line says which layers read: `colour RGB` is all three.
+`colour G` means the camera's colour is too coarse for the code, so move
+closer or lower the bytes per code. If it never says colour, use *Max*
+instead.
 
 ## How it is fast
 
@@ -211,7 +219,11 @@ colour, use *Max* instead.
   at 1 MiB and up to 1.99 at 16 MiB.
 - **Colour.** A colour code carries three frames. The receiver unmixes the
   camera's channels blind, from the code's own colour statistics, and reads
-  each channel as an ordinary QR code.
+  each channel as an ordinary QR code. Green goes first: it is most of
+  luma, so it survives the camera's coarse colour best, and where it reads,
+  red and blue are read at its position. A layer that misses is sharpened at
+  the code's module pitch and read again, which undoes most of the smear
+  between neighbouring modules.
 
 `scripts/loopback-bench.mjs` measures the receive pipeline end to end in
 headless Chrome. The browser sender's own display is re-filmed by a simulated
@@ -234,7 +246,11 @@ medians, with the run-to-run range of frames needed per source block:
 | 5 MiB | 1 | 44.2 s, 117 KiB/s | 33.1 s, 155 KiB/s | 1.30–1.41 → 1.00 |
 | 16 MiB | 4 | 33.0 s, 497 KiB/s | 24.5 s, 668 KiB/s | 1.31–1.33 → 1.00 |
 
-The wire carries 172 KiB/s at one code, 516 in colour and 688 at four. v4
+The wire carries 172 KiB/s at one code, 516 in colour and 688 at four. The
+*Colour* preset's 1465 bytes a layer ran at 249 and 252 KiB/s of its 255. The
+loopback camera keeps colour at plain 4:2:0, which is kinder than a phone, so
+this table flatters dense colour codes; `scripts/colour-camera.mjs` models
+the rest. v4
 runs within a few percent of that whenever the camera catches every frame,
 97% of it at 16 MiB. v3 loses the difference to overhead, which grows with
 the file and with loss. A transfer at four codes is mostly spent locking onto
@@ -250,7 +266,15 @@ larger run, and the checks that tell the wire's effect from the machine's.
 python3 scripts/serve-web.py --directory web/app --port 8765 &
 node scripts/loopback-bench.mjs --runs "codes=4&fps=60" "codes=4&fps=60&wire=3" --repeat 3
 node scripts/loopback-bench.mjs --runs "codes=1&fps=60&color=1&chroma=1" --size 5242880
+node scripts/colour-camera.mjs bytes=1465 side=516 cblur=1   # offline, no browser
 ```
+
+`scripts/colour-camera.mjs` films the sender's colour codes in software and
+runs the real decode worker on them, deterministically, with what a phone
+does to colour on top of 4:2:0: its colour noise reduction smears chroma
+further (`cblur`). At a smear of 1 pixel, version 40 colour codes read
+nothing at 2.8 pixels per module and only green at 3.4, as they did on an
+iPhone. Version 27 reads all three layers at both sizes.
 
 ## Limits
 
@@ -284,10 +308,11 @@ interleaved blocks, refusing hostile headers, a layout for the largest
 container a permitted file packs into, and receivers following a sender that
 switches wire. Every offered frame size and ECC level, and a receiver
 joining mid-stream, are run end to end over both wires.
-Colour codes are checked end to end through two synthetic cameras with 4:2:0
-chroma and crosstalk: the desktop receiver's tests and the loopback
-benchmark. The web worker's unmixing has its own tests in
-`web/app/tests/unmix.test.mjs`.
+Colour codes are checked end to end through three synthetic cameras with
+4:2:0 chroma and crosstalk: the desktop receiver's tests (one with chroma
+smeared further, where only sharpening reads red and blue), the loopback
+benchmark and `scripts/colour-camera.mjs`. The web worker's unmixing and
+sharpening have their own tests in `web/app/tests/unmix.test.mjs`.
 In the browser:
 
 - `web/app/tests/optical-loop.html` takes sender-drawn QR modules through the

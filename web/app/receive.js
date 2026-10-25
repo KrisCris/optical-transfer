@@ -60,7 +60,8 @@ let running = false;
 let generation = 0;
 let cameraStartedAt = 0;
 let lastAcceptedAt = 0;
-let lastColorAt = -Infinity;
+// When each layer of a colour code (red, green, blue) last decoded.
+const lastLayerAt = [-Infinity, -Infinity, -Infinity];
 let verdict = null;
 let objectUrl = null;
 let renderHandle = 0;
@@ -327,7 +328,7 @@ function onReply(job, reply) {
   for (const box of reply.sightings ?? []) tracker.noteSighting(box, now);
   for (const symbol of reply.symbols ?? []) {
     tracker.noteDecoded(symbol.box, now, symbol.quad, symbol.modules);
-    if (symbol.color) lastColorAt = now;
+    if (symbol.color) lastLayerAt[symbol.layer] = now;
     if (!completed) handleFrame(symbol.bytes, job.capturedAt, now);
   }
 }
@@ -505,8 +506,11 @@ function render(now, force = false) {
   t("size").textContent = stats ? formatBytes(stats.totalBytes) : "—";
   // v4's counters mean RaptorQ's things; the labels follow the stream.
   const v3 = stats?.wire === 3;
+  // Which layers of a colour code are reading: red and blue go first when
+  // the camera's colour is too coarse for the code's modules.
+  const layers = "RGB".split("").filter((_, layer) => now - lastLayerAt[layer] < 2000).join("");
   t("wire").textContent = stats
-    ? `v${stats.wire} · ${v3 ? "LT" : "RaptorQ"}${now - lastColorAt < 2000 ? " · colour" : ""}` : "—";
+    ? `v${stats.wire} · ${v3 ? "LT" : "RaptorQ"}${layers ? ` · colour ${layers}` : ""}` : "—";
   t("k").previousElementSibling.textContent = v3 || !stats ? "Blocks (k)" : "Symbols (k)";
   t("blocklen").previousElementSibling.textContent = v3 || !stats ? "Block size" : "Symbol size";
   t("pending").previousElementSibling.textContent = v3 || !stats ? "Parked eqs" : "Repair held";

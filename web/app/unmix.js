@@ -113,6 +113,64 @@ export function unmixing(pixels, width, area) {
   return { rows, offsets };
 }
 
+/** How far sharpening pushes a pixel from the mean of the box around it, as a
+ *  multiple of its difference from that mean. */
+const SHARPEN_AMOUNT = 1.2;
+
+// Sharpening's working space, kept between calls: a worker reads one layer at
+// a time, and three layers a frame would otherwise allocate megabytes each.
+let grey = new Uint8Array(0);
+let rowSums = new Uint16Array(0);
+let columnSums = new Uint32Array(0);
+
+/**
+ * Unsharp masking of a layer `writeLayer` left in `out`, in place: each pixel
+ * moves away from the mean of the `2·radius + 1` box around it. A camera keeps
+ * colour coarser than brightness (4:2:0, then its own colour noise reduction),
+ * so an unmixed layer's modules are smeared into their neighbours, and a lone
+ * light module among dark ones reads dark. With `radius` about one module,
+ * this pushes each module back towards its own level.
+ */
+export function sharpenLayer(out, w, h, radius) {
+  const r = Math.max(1, Math.min(64, Math.round(radius)));
+  const n = w * h;
+  if (grey.length < n) {
+    grey = new Uint8Array(n);
+    rowSums = new Uint16Array(n);
+  }
+  if (columnSums.length < w) columnSums = new Uint32Array(w);
+  for (let i = 0; i < n; i++) grey[i] = out[i] & 0xff;
+  // Box sums along each row, edges extended.
+  for (let y = 0, row = 0; y < h; y++, row += w) {
+    let sum = grey[row] * (r + 1);
+    for (let x = 1; x <= r; x++) sum += grey[row + Math.min(w - 1, x)];
+    for (let x = 0; x < w; x++) {
+      rowSums[row + x] = sum;
+      sum += grey[row + Math.min(w - 1, x + r + 1)] - grey[row + Math.max(0, x - r)];
+    }
+  }
+  // Then down each column, a row at a time so memory is read in order.
+  for (let x = 0; x < w; x++) {
+    let sum = rowSums[x] * (r + 1);
+    for (let y = 1; y <= r; y++) sum += rowSums[Math.min(h - 1, y) * w + x];
+    columnSums[x] = sum;
+  }
+  const area = 1 / ((2 * r + 1) * (2 * r + 1));
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    const entering = Math.min(h - 1, y + r + 1) * w;
+    const leaving = Math.max(0, y - r) * w;
+    for (let x = 0; x < w; x++) {
+      const level = grey[row + x];
+      const value = level + SHARPEN_AMOUNT * (level - columnSums[x] * area);
+      // Rounded: an even layer has to come back exactly as it was.
+      const g = value <= 0 ? 0 : value >= 255 ? 255 : (value + 0.5) | 0;
+      out[row + x] = 0xff000000 | (g << 16) | (g << 8) | g;
+      columnSums[x] += rowSums[entering + x] - rowSums[leaving + x];
+    }
+  }
+}
+
 /** One unmixed channel of `rect` (picture coordinates) as grey RGBA pixels
  *  into `out`, a Uint32Array: one write per pixel, clamped by hand. Little
  *  endian, as every platform with WebAssembly is: red is the low byte. */

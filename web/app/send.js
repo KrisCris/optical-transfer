@@ -9,7 +9,9 @@ const PRESETS = {
   reliable: { bytes: 1465, fps: 24, codes: 1, color: false },
   balanced: { bytes: 2331, fps: 30, codes: 2, color: false },
   fast: { bytes: 2953, fps: 60, codes: 1, color: false },
-  color: { bytes: 2953, fps: 60, codes: 1, color: true },
+  // A camera keeps colour coarser than brightness, so a colour code needs
+  // larger modules than a black and white one: version 27, not 40.
+  color: { bytes: 1465, fps: 60, codes: 1, color: true },
   max: { bytes: 2953, fps: 60, codes: 4, color: false },
 };
 const BYTES_OPTIONS = [500, 1000, 1465, 1850, 2331, 2953];

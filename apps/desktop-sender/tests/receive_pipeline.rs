@@ -17,10 +17,12 @@ use std::{
 };
 
 use desktop_sender::receive::{
+    camera::LumaFrame,
     decoder::Decoder,
     session::Session,
     synthetic::{Framing, camera_frame, colour_frame},
     tracker::{Crop, Mode},
+    unmix::{layers, unmixing},
 };
 use optical_core::{
     qr::{Ecc, QrFrame},
@@ -41,8 +43,12 @@ fn noise(len: usize, mut seed: u64) -> Vec<u8> {
 }
 
 fn transfer(bytes: &[u8], codes: usize) -> Transfer {
+    transfer_of(bytes, codes, 2953)
+}
+
+fn transfer_of(bytes: &[u8], codes: usize, frame_bytes: usize) -> Transfer {
     let settings = TransferSettings {
-        frame_bytes: 2953,
+        frame_bytes,
         frames_per_second: 60,
         ecc: Ecc::Low,
         grid_codes: codes,
@@ -254,4 +260,103 @@ fn a_colour_code_is_unmixed_into_its_three_layers() {
             .all(|symbol| !symbol.colour && symbol.bytes == payloads[1]),
         "at most the green layer, read as an ordinary code"
     );
+}
+
+/// `frame`'s chroma smeared by a Gaussian of `sigma` chroma samples, the way
+/// a phone's colour noise reduction smears it on top of 4:2:0.
+fn smear_chroma(frame: &mut LumaFrame, sigma: f32) {
+    let (width, height) = (frame.width.div_ceil(2), frame.height.div_ceil(2));
+    let radius = (sigma * 3.0).ceil() as isize;
+    let kernel: Vec<f32> = (-radius..=radius)
+        .map(|k| (-((k * k) as f32) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let total: f32 = kernel.iter().sum();
+    for plane in 0..2 {
+        let at = |x: isize, y: isize, chroma: &[f32]| {
+            chroma[(y.clamp(0, height as isize - 1) as usize) * width
+                + x.clamp(0, width as isize - 1) as usize]
+        };
+        let source: Vec<f32> = (0..width * height)
+            .map(|i| f32::from(frame.chroma[i * 2 + plane]))
+            .collect();
+        let mut across = vec![0.0; width * height];
+        for y in 0..height as isize {
+            for x in 0..width as isize {
+                across[y as usize * width + x as usize] = (-radius..=radius)
+                    .map(|k| kernel[(k + radius) as usize] * at(x + k, y, &source))
+                    .sum::<f32>()
+                    / total;
+            }
+        }
+        for y in 0..height as isize {
+            for x in 0..width as isize {
+                let value = (-radius..=radius)
+                    .map(|k| kernel[(k + radius) as usize] * at(x, y + k, &across))
+                    .sum::<f32>()
+                    / total;
+                frame.chroma[(y as usize * width + x as usize) * 2 + plane] =
+                    value.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Colour coarser than 4:2:0 alone leaves it, as a phone's colour noise
+/// reduction makes it: read plainly, only green (which most of luma is)
+/// survives. Red and blue read once sharpened at the pitch green read at.
+#[test]
+fn coarse_camera_colour_still_reads_every_layer() {
+    let mut transfer = transfer_of(&noise(64 * 1024, 9), 1, 1465);
+    let mut renderer = transfer.renderer();
+    let payloads: Vec<Vec<u8>> = (0..3).map(|_| transfer.next_payload()).collect();
+    let codes: Vec<QrFrame> = payloads
+        .iter()
+        .map(|payload| renderer.render(payload).unwrap())
+        .collect();
+    assert_eq!(codes[0].version, 27, "the Colour preset's 1465 bytes");
+    let mut frame = colour_frame(&codes, framing(1, 1280, 960, 4.0, 1.5), 0.2);
+    smear_chroma(&mut frame, 0.8);
+    let decoder = Decoder::new();
+    let whole = Crop {
+        x: 0,
+        y: 0,
+        w: frame.width,
+        h: frame.height,
+    };
+    let middle = Crop {
+        x: 440,
+        y: 280,
+        w: 400,
+        h: 400,
+    };
+    let unmix = unmixing(&frame, middle).expect("the code is colour");
+    let plain: Vec<bool> = layers(&frame, whole, &unmix)
+        .into_iter()
+        .map(|pixels| {
+            let layer = LumaFrame {
+                width: frame.width,
+                height: frame.height,
+                pixels,
+                chroma: Vec::new(),
+            };
+            !decoder.decode(&layer, whole, true).symbols.is_empty()
+        })
+        .collect();
+    assert_eq!(
+        plain,
+        [false, true, false],
+        "read plainly, only green survives"
+    );
+
+    let scan = decoder.decode(&frame, whole, true);
+    let mut bytes: Vec<Vec<u8>> = scan
+        .symbols
+        .iter()
+        .inspect(|symbol| assert!(symbol.colour))
+        .map(|symbol| symbol.bytes.clone())
+        .collect();
+    bytes.sort();
+    let mut expected = payloads;
+    expected.sort();
+    assert_eq!(bytes, expected, "every layer, each once");
 }

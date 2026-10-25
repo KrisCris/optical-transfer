@@ -186,16 +186,17 @@ colour on the desktop receiver, which unmixes the camera's own NV12 colour.
 
 ## Cases 12–16: wire v4 and colour codes
 
-Telemetry's *Format* line says which wire is arriving, and adds `colour`
-while colour codes decode. Record it with every result.
+Telemetry's *Format* line says which wire is arriving, and while colour codes
+decode, which layers: `colour RGB` is all three, `colour G` green alone.
+Record it with every result.
 
 - **12** shows whether v4's lower overhead survives a lens. Telemetry's
   *Overhead* should read 1.00 on v4. On v3 it varies from run to run, from
   about 1.0 to 1.6. Compare elapsed times across the alternating runs, not
   against older sessions.
 - **13** shows whether colour survives a real camera at all. If *Format* never
-  shows colour, or the rate stays near one code's (about 170 KiB/s), the
-  camera's colour processing beat the unmixing. Write down the distance, how
+  shows colour, shows only `colour G`, or the rate stays near one code's
+  (about 170 KiB/s), the camera's colour processing beat the unmixing. Write down the distance, how
   much of the view the code fills, the sending screen's brightness, and
   whether True Tone or Night Shift was on. Then step closer before giving up.
   The 120 fps capture run catches more of a 60 fps stream if the phone

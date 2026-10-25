@@ -10,7 +10,7 @@
 // served stale across versions, and nothing revalidates over a network that
 // may not exist.
 
-const VERSION = "optical-transfer-v14";
+const VERSION = "optical-transfer-v15";
 
 // Every file the receiver needs to reach its camera-ready screen. Checked
 // against the served tree by scripts/check-web.py, so a new asset that is not

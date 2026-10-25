@@ -24,20 +24,26 @@
 //! A colour code is three codes in the red, green and blue channels sharing
 //! one geometry. Read for brightness it is found and does not decode, or
 //! decodes as the layer luma favours, so wherever a code has colour in it the
-//! layers are unmixed ([`crate::receive::unmix`]) and each is read on its own.
+//! layers are unmixed ([`crate::receive::unmix`]) and each is read on its own:
+//! green first, which carries most of luma and survives coarse camera colour
+//! best, then red and blue, sharpened at green's module pitch if they miss.
 
 use std::time::Instant;
 
-use zxingcpp::{BarcodeFormat, BarcodeReader, ImageFormat, ImageView};
+use zxingcpp::{BarcodeFormat, BarcodeReader, ImageFormat, ImageView, PointI};
 
 use crate::receive::{
     camera::LumaFrame,
     tracker::{Bounds, Crop},
-    unmix::{Unmixing, layers, unmixing},
+    unmix::{Unmixing, layers, sharpen, unmixing},
 };
 
 /// Codes a full scan checks for colour.
 const COLOR_SIGHTINGS: usize = 4;
+
+/// Green first: it carries most of luma, so it survives a camera's coarse
+/// colour best, and the pitch it reads at is what the others sharpen at.
+const LAYER_ORDER: [usize; 3] = [1, 0, 2];
 
 /// One decoded code, in whole-frame pixels.
 #[derive(Clone, Debug)]
@@ -46,6 +52,8 @@ pub struct Symbol {
     pub bounds: Bounds,
     /// Read from one layer of a colour code.
     pub colour: bool,
+    /// Frame pixels per module, where zxing reported the code's version.
+    pub pitch: Option<f32>,
 }
 
 #[derive(Debug, Default)]
@@ -103,7 +111,7 @@ impl Decoder {
                 h: area.h * 2 / 5,
             };
             if let Some(unmix) = unmixing(frame, middle) {
-                self.read_layers(frame, area, &unmix, &mut reply);
+                self.read_layers(frame, area, &unmix, None, &mut reply);
             }
         }
         if reply.symbols.is_empty()
@@ -158,7 +166,10 @@ impl Decoder {
             let before = reply.symbols.len();
             if let Some(unmix) = unmix {
                 attempts += 1;
-                self.read_layers(frame, crop_of(bounds, 0.1, frame), &unmix, reply);
+                // A code read for brightness is the layer luma favours, and
+                // its pitch is the colour layers' too.
+                let pitch = symbol.as_ref().and_then(|symbol| symbol.pitch);
+                self.read_layers(frame, crop_of(bounds, 0.1, frame), &unmix, pitch, reply);
             }
             if reply.symbols.len() == before {
                 match symbol {
@@ -170,14 +181,43 @@ impl Decoder {
     }
 
     /// The three layers of a colour code in `crop`, each decoded on its own.
-    fn read_layers(&self, frame: &LumaFrame, crop: Crop, unmix: &Unmixing, reply: &mut Reply) {
+    /// `pitch` is the code's pixels per module where already known; a layer
+    /// read here supplies it otherwise.
+    fn read_layers(
+        &self,
+        frame: &LumaFrame,
+        crop: Crop,
+        unmix: &Unmixing,
+        mut pitch: Option<f32>,
+        reply: &mut Reply,
+    ) {
         let offset = (crop.x as f32, crop.y as f32);
-        for layer in layers(frame, crop, unmix) {
+        let mut layers = layers(frame, crop, unmix);
+        let read = |layer: &[u8], reply: &mut Reply| {
             if let Ok(view) =
-                ImageView::from_slice(&layer, crop.w as i32, crop.h as i32, ImageFormat::Lum)
+                ImageView::from_slice(layer, crop.w as i32, crop.h as i32, ImageFormat::Lum)
             {
                 self.read(&self.crop, view, offset, false, true, reply);
             }
+        };
+        for channel in LAYER_ORDER {
+            let layer = &mut layers[channel];
+            let before = reply.symbols.len();
+            read(layer, reply);
+            // Coarse camera colour smears a layer's modules into their
+            // neighbours, which sharpening at the module pitch mostly undoes.
+            // Only a layer that missed pays for it.
+            if reply.symbols.len() == before
+                && let Some(pitch) = pitch
+            {
+                sharpen(layer, crop.w, crop.h, pitch);
+                read(layer, reply);
+            }
+            pitch = pitch.or_else(|| {
+                reply.symbols[before..]
+                    .iter()
+                    .find_map(|symbol| symbol.pitch)
+            });
         }
     }
 
@@ -221,10 +261,26 @@ impl Decoder {
             if barcode.is_valid() {
                 let bytes = barcode.bytes();
                 if !bytes.is_empty() {
+                    let version = barcode.extra_with_key("Version");
+                    let pitch = version
+                        .trim_matches('"')
+                        .parse::<usize>()
+                        .ok()
+                        .map(|version| {
+                            let length = |a: PointI, b: PointI| {
+                                ((b.x - a.x) as f32).hypot((b.y - a.y) as f32)
+                            };
+                            let sides = length(corners[0], corners[1])
+                                + length(corners[3], corners[2])
+                                + length(corners[0], corners[3])
+                                + length(corners[1], corners[2]);
+                            sides / (4 * (17 + 4 * version)) as f32
+                        });
                     reply.symbols.push(Symbol {
                         bytes,
                         bounds,
                         colour,
+                        pitch,
                     });
                 }
             } else if sightings && bounds.w > 0.0 && bounds.h > 0.0 {

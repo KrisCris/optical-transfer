@@ -25,6 +25,9 @@ const GAIN: f64 = 60.0;
 const SAMPLES: usize = 40_000;
 /// Enough to tell colour from black and white, whose spreads differ tenfold.
 const PROBE_SAMPLES: usize = 2_500;
+/// How far sharpening pushes a pixel from the mean of the box around it, as a
+/// multiple of its difference from that mean.
+const SHARPEN_AMOUNT: f32 = 1.2;
 
 /// Per layer, grey-level weights on camera RGB and an offset.
 #[derive(Clone, Debug)]
@@ -211,6 +214,50 @@ pub fn layers(frame: &LumaFrame, crop: Crop, unmix: &Unmixing) -> [Vec<u8>; 3] {
     layers
 }
 
+/// Unsharp masking of an unmixed layer, in place: each pixel moves away from
+/// the mean of the `2·radius + 1` box around it. A camera keeps colour
+/// coarser than brightness (4:2:0, then its own colour noise reduction), so a
+/// layer's modules are smeared into their neighbours, and a lone light module
+/// among dark ones reads dark. With `radius` about one module, this pushes
+/// each module back towards its own level. The web receiver's `sharpenLayer`.
+pub fn sharpen(layer: &mut [u8], width: usize, height: usize, radius: f32) {
+    if width == 0 || height == 0 || layer.len() < width * height {
+        return;
+    }
+    let r = (radius.round() as usize).clamp(1, 64);
+    let source = layer[..width * height].to_vec();
+    // Box sums along each row, edges extended.
+    let mut rows = vec![0_u32; width * height];
+    for (sums, row) in rows.chunks_exact_mut(width).zip(source.chunks_exact(width)) {
+        let at = |x: usize| u32::from(row[x.min(width - 1)]);
+        let mut sum = u32::from(row[0]) * r as u32 + (0..=r).map(at).sum::<u32>();
+        for (x, slot) in sums.iter_mut().enumerate() {
+            *slot = sum;
+            sum = sum + at(x + r + 1) - at(x.saturating_sub(r));
+        }
+    }
+    // Then down each column, a row at a time so memory is read in order.
+    let mut columns: Vec<u32> = (0..width)
+        .map(|x| {
+            rows[x] * r as u32
+                + (0..=r)
+                    .map(|y| rows[y.min(height - 1) * width + x])
+                    .sum::<u32>()
+        })
+        .collect();
+    let area = 1.0 / ((2 * r + 1) * (2 * r + 1)) as f32;
+    for y in 0..height {
+        let entering = (y + r + 1).min(height - 1) * width;
+        let leaving = y.saturating_sub(r) * width;
+        for x in 0..width {
+            let level = f32::from(source[y * width + x]);
+            let value = level + SHARPEN_AMOUNT * (level - columns[x] as f32 * area);
+            layer[y * width + x] = value.round().clamp(0.0, 255.0) as u8;
+            columns[x] = columns[x] + rows[entering + x] - rows[leaving + x];
+        }
+    }
+}
+
 /// Camera RGB to the frame layout a camera delivers: luma, and chroma
 /// averaged over 2×2 blocks (4:2:0), BT.709 full range. For synthetic
 /// cameras; the inverse of what [`unmixing`] reads.
@@ -350,5 +397,80 @@ mod tests {
                 .count();
             assert!(wrong <= 4, "layer {channel}: {wrong} modules misread");
         }
+    }
+
+    /// Modules `pitch` pixels square, smeared by a Gaussian of `sigma` pixels
+    /// the way coarse camera colour smears an unmixed layer.
+    fn smeared(modules: &[bool], cells: usize, pitch: usize, sigma: f32) -> Vec<u8> {
+        let side = cells * pitch;
+        let level = |x: usize, y: usize| {
+            if modules[(y / pitch) * cells + x / pitch] {
+                68.0
+            } else {
+                188.0
+            }
+        };
+        let radius = (sigma * 3.0).ceil() as isize;
+        let kernel: Vec<f32> = (-radius..=radius)
+            .map(|k| (-((k * k) as f32) / (2.0 * sigma * sigma)).exp())
+            .collect();
+        let total: f32 = kernel.iter().sum();
+        let clamp = |value: isize| value.clamp(0, side as isize - 1) as usize;
+        let across: Vec<f32> = (0..side * side)
+            .map(|i| {
+                let (x, y) = ((i % side) as isize, i / side);
+                (-radius..=radius)
+                    .map(|k| kernel[(k + radius) as usize] * level(clamp(x + k), y))
+                    .sum::<f32>()
+                    / total
+            })
+            .collect();
+        (0..side * side)
+            .map(|i| {
+                let (x, y) = (i % side, (i / side) as isize);
+                let sum: f32 = (-radius..=radius)
+                    .map(|k| kernel[(k + radius) as usize] * across[clamp(y + k) * side + x])
+                    .sum();
+                (sum / total).round() as u8
+            })
+            .collect()
+    }
+
+    /// Modules whose centre pixel reads the wrong side of mid-grey.
+    fn misread(layer: &[u8], modules: &[bool], cells: usize, pitch: usize) -> usize {
+        let side = cells * pitch;
+        (0..cells * cells)
+            .filter(|&module| {
+                let (column, row) = (module % cells, module / cells);
+                let centre = (row * pitch + pitch / 2) * side + column * pitch + pitch / 2;
+                (layer[centre] < 128) != modules[module]
+            })
+            .count()
+    }
+
+    #[test]
+    fn sharpening_at_the_module_pitch_reads_back_smeared_modules() {
+        let mut next = random(23);
+        let (cells, pitch) = (48, 4);
+        let modules: Vec<bool> = (0..cells * cells).map(|_| next() < 0.5).collect();
+        let mut layer = smeared(&modules, cells, pitch, 2.2);
+        let before = misread(&layer, &modules, cells, pitch);
+        sharpen(&mut layer, cells * pitch, cells * pitch, pitch as f32);
+        let after = misread(&layer, &modules, cells, pitch);
+        assert!(
+            before > cells * cells / 25,
+            "the smear alone misreads {before} modules"
+        );
+        assert!(
+            after < before / 10,
+            "sharpened, {after} of {before} misread modules remain"
+        );
+    }
+
+    #[test]
+    fn sharpening_leaves_an_even_layer_even() {
+        let mut layer = vec![150_u8; 40 * 40];
+        sharpen(&mut layer, 40, 40, 5.0);
+        assert!(layer.iter().all(|&level| level == 150));
     }
 }

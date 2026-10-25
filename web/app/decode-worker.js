@@ -17,7 +17,7 @@
 // coarse look at a few thousand pixels per crop, about 0.02 ms, says so.
 
 import DecimenCodec from "./vendor/decimen-codec/decimen_codec.js";
-import { unmixing, writeLayer } from "./unmix.js";
+import { sharpenLayer, unmixing, writeLayer } from "./unmix.js";
 
 const ready = DecimenCodec({
   // Emscripten resolves the .wasm relative to the glue by default, which is
@@ -39,6 +39,32 @@ function boundsOf(quad, offsetX, offsetY) {
 /** Codes a full scan checks for colour. */
 const COLOR_SIGHTINGS = 4;
 
+/** Green first: it carries most of luma, so it survives a camera's coarse
+ *  colour best, and where it reads, the other two layers are read there. */
+const LAYER_ORDER = [1, 0, 2];
+
+/** Pixels per module of a code at `quad` with `modules` across. */
+function pitchOf(quad, modules) {
+  const length = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+  const sides = length(quad.topLeft, quad.topRight) + length(quad.bottomLeft, quad.bottomRight)
+    + length(quad.topLeft, quad.bottomLeft) + length(quad.topRight, quad.bottomRight);
+  return sides / (4 * modules);
+}
+
+/** A tracked read of the layer in `at` (`rect` of the picture) at `anchor`,
+ *  picture coordinates; the result when it decoded, else null. */
+function readAt(codec, at, rect, anchor) {
+  const q = anchor.quad;
+  const result = codec.readTracked(
+    at, rect.w, rect.h, anchor.modules,
+    q.topLeft.x - rect.x, q.topLeft.y - rect.y,
+    q.topRight.x - rect.x, q.topRight.y - rect.y,
+    q.bottomRight.x - rect.x, q.bottomRight.y - rect.y,
+    q.bottomLeft.x - rect.x, q.bottomLeft.y - rect.y,
+  );
+  return result.valid && result.bytes.length > 0 ? result : null;
+}
+
 /**
  * Decode each layer of a colour code in `rect` of the picture on its own.
  * `at` is heap space for `rect` in RGBA and is overwritten. With a `quad` and
@@ -50,27 +76,30 @@ function readLayers(codec, at, pixels, width, rect, unmix, quad, modules, origin
   const symbols = [];
   const x = originX + rect.x;
   const y = originY + rect.y;
-  for (let channel = 0; channel < 3; channel++) {
-    // A fresh view each time: a decode that grows the heap detaches the last.
-    writeLayer(new Uint32Array(codec.HEAPU8.buffer, at, rect.w * rect.h), pixels, width, rect, unmix, channel);
+  // A fresh view each time: a decode that grows the heap detaches the last.
+  const layer = () => new Uint32Array(codec.HEAPU8.buffer, at, rect.w * rect.h);
+  let anchor = quad && modules ? { quad, modules } : null;
+  // Once one layer of this picture has been read, the code's position is this
+  // frame's own and a layer that still misses there is unreadable, not
+  // misplaced: a full read would find the same code and fail again.
+  let placed = false;
+  for (const channel of LAYER_ORDER) {
+    writeLayer(layer(), pixels, width, rect, unmix, channel);
     let found = null;
-    let tracked = false;
-    if (quad && modules) {
+    if (anchor) {
       paths.trackedAttempted = true;
-      const result = codec.readTracked(
-        at, rect.w, rect.h, modules,
-        quad.topLeft.x - rect.x, quad.topLeft.y - rect.y,
-        quad.topRight.x - rect.x, quad.topRight.y - rect.y,
-        quad.bottomRight.x - rect.x, quad.bottomRight.y - rect.y,
-        quad.bottomLeft.x - rect.x, quad.bottomLeft.y - rect.y,
-      );
-      if (result.valid && result.bytes.length > 0) {
-        found = result;
-        tracked = true;
-        paths.trackedHit = true;
+      found = readAt(codec, at, rect, anchor);
+      // Coarse camera colour smears a layer's modules into their neighbours,
+      // which sharpening at the module pitch mostly undoes. It costs about
+      // what unmixing the layer did, so only a layer that missed pays for it.
+      if (!found) {
+        sharpenLayer(layer(), rect.w, rect.h, pitchOf(anchor.quad, anchor.modules));
+        found = readAt(codec, at, rect, anchor);
       }
+      if (found) paths.trackedHit = true;
     }
-    if (!found) {
+    const tracked = Boolean(found);
+    if (!found && !placed) {
       const results = codec.readFull(at, rect.w, rect.h, true, 1, false);
       for (let index = 0; index < results.size() && !found; index++) {
         const result = results.get(index);
@@ -88,6 +117,8 @@ function readLayers(codec, at, pixels, width, rect, unmix, quad, modules, origin
         color: true,
         layer: channel,
       });
+      if (!placed) anchor = { quad: shifted(found.position, rect.x, rect.y), modules: found.modules };
+      placed = true;
     }
   }
   return symbols;
@@ -156,6 +187,8 @@ self.onmessage = async (event) => {
   try {
     const symbols = [];
     const sightings = [];
+    // Where the scan's detector placed each sighting, for the colour path.
+    const placements = new Map();
 
     // Colour first wherever the code has colour in it. A miss still falls
     // through to brightness on the original pixels.
@@ -214,7 +247,10 @@ self.onmessage = async (event) => {
           });
         } else if (full) {
           const box = boundsOf(result.position, offsetX, offsetY);
-          if (box.w > 0 && box.h > 0) sightings.push(box);
+          if (box.w > 0 && box.h > 0) {
+            sightings.push(box);
+            placements.set(box, { quad: shifted(result.position, offsetX, offsetY), modules: result.modules });
+          }
         }
       }
       results.delete();
@@ -238,7 +274,12 @@ self.onmessage = async (event) => {
         if (unmix) {
           colorAttempted++;
           const rect = grown(foundArea, 0.1, width, height);
-          symbols.push(...readLayers(codec, pointer, pixels, width, rect, unmix, null, 0, offsetX, offsetY, paths));
+          // The detector's own fix on the code, decoded or not, is where the
+          // layers are tried first, and gives the pitch to sharpen them at.
+          const placement = symbol ?? placements.get(foundBox);
+          const quad = placement?.modules ? shifted(placement.quad, -offsetX, -offsetY) : null;
+          symbols.push(...readLayers(codec, pointer, pixels, width, rect, unmix, quad, placement?.modules ?? 0,
+            offsetX, offsetY, paths));
         }
         if (symbols.length === before) {
           if (symbol) symbols.push(symbol);
