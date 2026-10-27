@@ -111,7 +111,7 @@ try {
         String(result.catchRate).padStart(7), String(result.overhead).padStart(9),
         String(result.captureFps).padStart(8), String(result.decodeFps).padStart(6),
         String(result.latency.tracked).padStart(11), String(Math.round(result.senderHz ?? 0)).padStart(4),
-        String(Math.round((100 * result.totals.dropped) / Math.max(1, result.totals.captures))).padStart(6),
+        String(Math.round((100 * result.totals.dropped) / Math.max(1, result.totals.crops))).padStart(6),
         String(result.utilization).padStart(5), result.verified ? " yes" : result.final ? " TIMEOUT" : " ?",
       ].join(" "));
     }

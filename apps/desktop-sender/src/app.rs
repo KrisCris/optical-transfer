@@ -39,7 +39,7 @@ use optical_core::{
 
 use crate::{
     packing::{PackingJob, PackingState},
-    stream::{FlipClock, Frame, FrameSource, best_grid},
+    stream::{FlipClock, Frame, FrameSource, SHORT_HOLD, best_grid},
     theme,
 };
 
@@ -49,7 +49,10 @@ const SECURITY_DETAIL: &str = "Anyone with a camera pointed at this screen can r
 
 /// The browser sender's presets, so advice like "use Balanced" means the same
 /// numbers on both. They choose speed, not compatibility: the wire format
-/// stays as set.
+/// stays as set. Frame rates are ceilings ([`crate::stream::hold_frames`]):
+/// 36 holds every code about 28 ms, long enough for a phone filming at 60 fps,
+/// which is four refreshes of a 144 Hz display and two of a 60 Hz one, where
+/// it runs at 30.
 pub struct Preset {
     pub name: &'static str,
     pub frame_bytes: usize,
@@ -69,14 +72,14 @@ pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "Balanced",
         frame_bytes: 2331,
-        fps: 30,
+        fps: 36,
         codes: 2,
         color: false,
     },
     Preset {
         name: "Fast",
         frame_bytes: 2953,
-        fps: 60,
+        fps: 36,
         codes: 1,
         color: false,
     },
@@ -85,14 +88,14 @@ pub const PRESETS: [Preset; 5] = [
     Preset {
         name: "Colour",
         frame_bytes: 1465,
-        fps: 60,
+        fps: 36,
         codes: 1,
         color: true,
     },
     Preset {
         name: "Max",
         frame_bytes: 2953,
-        fps: 60,
+        fps: 36,
         codes: 4,
         color: false,
     },
@@ -201,6 +204,16 @@ impl Live {
             self.version = frame.version;
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    /// Payload bytes a second at the rate this display allows.
+    fn wire_rate(&self) -> f64 {
+        let settings = self.source.info.settings;
+        let payload = settings
+            .frame_bytes
+            .saturating_sub(settings.wire.header_len());
+        let codes = (self.cells.len() * settings.layers()) as f64;
+        codes * payload as f64 / self.clock.hold().1.as_secs_f64()
     }
 
     /// Frame rate and code count change live; the stream keeps its place.
@@ -769,7 +782,12 @@ impl SenderApp {
         }
 
         ui.add_space(12.0);
-        let wire = self.settings.wire_rate() / 1024.0;
+        // While streaming, at the rate this display allows: 36 fps runs at 30
+        // on a 60 Hz screen.
+        let wire = match &self.stage {
+            Stage::Streaming(live) => live.wire_rate(),
+            _ => self.settings.wire_rate(),
+        } / 1024.0;
         theme::card(
             ui,
             "Speed",
@@ -1075,7 +1093,11 @@ impl SenderApp {
                 ui.label(
                     RichText::new(
                         "Bytes, error correction, wire format and colour restart the \
-                             stream. Frame rate and code count change it live.",
+                             stream. Frame rate and code count change it live. Each code \
+                             stays up a whole number of screen refreshes, so the frame \
+                             rate is a ceiling: 36 is four refreshes at 144 Hz and two at \
+                             60 Hz, which runs at 30. A phone filming at 60 fps misses \
+                             most codes shown for less than about 25 ms.",
                     )
                     .size(theme::SMALL - 0.5)
                     .color(theme::TEXT_FAINT),
@@ -1284,7 +1306,8 @@ impl StreamStats {
                 1.0,
             ),
         };
-        let per_second = f64::from(settings.frames_per_second) * codes as f64;
+        let (hold_frames, hold) = live.clock.hold();
+        let per_second = codes as f64 / hold.as_secs_f64();
         let frames_per_second = per_second * layers as f64;
         let best = k as f64 / frames_per_second;
         let target = per_second.round() as usize;
@@ -1341,14 +1364,22 @@ impl StreamStats {
                 format!("{flips} / {target} per s"),
                 if slow { theme::WARN } else { plain },
             ),
+            // How long each code holds still is what decides whether a
+            // camera reads it.
             match live.clock.refresh_hz() {
                 None => ("—".to_owned(), plain),
-                // Each cell flips at most once per refresh, so the display
-                // caps the frame rate; say so rather than look like a fault.
-                Some(hz) if hz < f64::from(settings.frames_per_second) * 0.95 => {
-                    (format!("{hz:.0} Hz · caps {hz:.0} fps"), theme::WARN)
-                }
-                Some(hz) => (format!("{hz:.0} Hz"), plain),
+                Some(hz) => (
+                    format!(
+                        "{hz:.0} Hz · {:.0} ms a code ({hold_frames} refresh{})",
+                        hold.as_secs_f64() * 1000.0,
+                        if hold_frames == 1 { "" } else { "es" }
+                    ),
+                    if hold < SHORT_HOLD {
+                        theme::WARN
+                    } else {
+                        plain
+                    },
+                ),
             },
         ];
         Self {

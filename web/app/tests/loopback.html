@@ -294,7 +294,7 @@ telemetry.workers = config.workers;
 const loop = new CaptureLoop({
   video, pool, tracker,
   onCapture: (now, plan) => telemetry.capture(now, plan),
-  onDropped: (now) => telemetry.dropped(now),
+  onDropped: () => telemetry.dropped(),
 });
 const startedAt = performance.now();
 loop.start();

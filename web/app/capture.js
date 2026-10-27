@@ -5,14 +5,17 @@
 //  * RegionTracker decides, for each captured frame, which pixels are worth
 //    decoding: one padded crop per code it has seen recently, plus a periodic
 //    full-frame scan to acquire or reacquire codes. Pure logic, no DOM.
-//  * DecodePool owns the workers. A busy pool drops frames instead of queueing
-//    them: a queued camera frame is a stale one, and the fountain does not
-//    care which frames it misses.
+//  * DecodePool owns the workers. Crops wait in a short line for a busy pool:
+//    a code is on screen for only a capture or two, so a skipped crop is
+//    usually a code lost, while one decoded a few milliseconds late is as
+//    good as on time. A full scan never waits; when no worker is idle it is
+//    simply still due on the next capture.
 //  * CaptureLoop runs once per camera frame, reads pixels back and feeds both.
 //
-// The scheduling rules follow upstream's field-measured receiver, with one
-// deliberate difference: a due full scan takes one worker and crops still get
-// the rest, instead of the whole capture going to the scan.
+// The scheduling rules follow upstream's field-measured receiver, with two
+// deliberate differences: a due full scan takes one worker and crops still get
+// the rest, instead of the whole capture going to the scan; and crops wait for
+// a busy pool instead of being dropped with the capture.
 
 /** How long a region survives without a decode or sighting. Longer TTLs were
  *  measured worse upstream: a dead region squats on crop slots. */
@@ -26,6 +29,8 @@ export const LOCKED_SCAN_MS = 1500;
 export const EXPECTED_DECAY_MS = 10_000;
 export const REGION_PAD = 0.35;
 export const MAX_REGIONS = 9;
+/** Crops that may wait per worker before the oldest is dropped. */
+export const WAITING_PER_WORKER = 2;
 const MIN_CROP = 32;
 
 export class RegionTracker {
@@ -112,13 +117,14 @@ export class RegionTracker {
   }
 
   /**
-   * Decide what to decode from one captured frame.
+   * Decide what to decode from one captured frame, with `idle` workers free.
    *
-   * Returns `{ full, crops }`: whether to submit a full-frame scan, and up to
-   * `slots` crops (minus one if scanning). Crops are rotated across calls so a
-   * short pool does not starve the same region every frame.
+   * Returns `{ full, crops }`: whether to submit a full-frame scan, which
+   * needs an idle worker, and one crop per region, which may wait for one.
+   * Crops are rotated across calls so that when the line overflows, the crop
+   * it drops is not always the same region's.
    */
-  plan(now, slots, width, height) {
+  plan(now, idle, width, height) {
     this.regions = this.regions.filter((region) => now - region.seen <= REGION_TTL_MS);
     const live = this.decodedCount();
     if (live >= this.expected || now - this.expectedAt > EXPECTED_DECAY_MS) {
@@ -126,13 +132,12 @@ export class RegionTracker {
       this.expectedAt = now;
     }
     const interval = live === 0 ? ACQUIRE_SCAN_MS : live < this.expected ? DEGRADED_SCAN_MS : LOCKED_SCAN_MS;
-    const full = slots > 0 && now - this.lastFullScan >= interval;
+    const full = idle > 0 && now - this.lastFullScan >= interval;
     if (full) this.lastFullScan = now;
 
     const crops = [];
-    let free = slots - (full ? 1 : 0);
     const count = this.regions.length;
-    for (let index = 0; index < count && free > 0; index++) {
+    for (let index = 0; index < count; index++) {
       const region = this.regions[(index + this.rotate) % count];
       const size = Math.max(region.w, region.h);
       const pad = Math.round(size * REGION_PAD + Math.min(size, 2 * region.drift));
@@ -145,7 +150,6 @@ export class RegionTracker {
       // there is no quad yet, which is what unmixing a colour code needs.
       const box = { x: region.x, y: region.y, w: region.w, h: region.h };
       crops.push({ x, y, w, h, quad: region.quad, modules: region.modules, region: region.id, box });
-      free--;
     }
     this.rotate++;
     return { full, crops };
@@ -160,6 +164,7 @@ export class DecodePool {
     this.onReply = onReply;
     this.workers = [];
     this.jobs = [];
+    this.waiting = [];
     this.version = null;
   }
 
@@ -191,11 +196,19 @@ export class DecodePool {
         const job = this.jobs[slot];
         if (!job || job.id !== reply.id) return;
         this.jobs[slot] = null;
+        this.drain();
         this.onReply(job, reply);
       };
       this.workers.push(worker);
       this.jobs.push(null);
     }
+    this.waiting.splice(0, Math.max(0, this.waiting.length - this.limit));
+    this.drain();
+  }
+
+  /** How many jobs may wait for a worker. */
+  get limit() {
+    return WAITING_PER_WORKER * this.workers.length;
   }
 
   /** Hand a job to a free worker. False when all are busy. */
@@ -207,9 +220,27 @@ export class DecodePool {
     return true;
   }
 
-  /** Forget in-flight jobs without killing workers; their replies are dropped. */
+  /** Hand a job to a free worker, or line it up for the next one to finish.
+   *  Returns the job dropped from a full line to make room, or null. */
+  queue(job, transfer) {
+    if (this.submit(job, transfer)) return null;
+    this.waiting.push({ job, transfer });
+    return this.waiting.length > this.limit ? this.waiting.shift().job : null;
+  }
+
+  drain() {
+    while (this.waiting.length > 0) {
+      const { job, transfer } = this.waiting[0];
+      if (!this.submit(job, transfer)) return;
+      this.waiting.shift();
+    }
+  }
+
+  /** Forget in-flight and waiting jobs without killing workers; replies to
+   *  the in-flight ones are dropped. */
   forget() {
     this.jobs.fill(null);
+    this.waiting.length = 0;
   }
 }
 
@@ -258,12 +289,7 @@ export class CaptureLoop {
     const height = video.videoHeight;
     if (!width || !height) return;
     const now = performance.now();
-    const slots = this.pool.free;
-    if (slots === 0) {
-      this.onDropped(now);
-      return;
-    }
-    const plan = this.tracker.plan(now, slots, width, height);
+    const plan = this.tracker.plan(now, this.pool.free, width, height);
     if (!plan.full && plan.crops.length === 0) return;
 
     if (!this.canvas) {
@@ -277,15 +303,15 @@ export class CaptureLoop {
     this.context.drawImage(video, 0, 0);
     this.onCapture(now, plan);
 
-    const submit = (x, y, w, h, full, quad, modules, box) => {
+    const job = (x, y, w, h, full, quad, modules, box) => {
       const image = this.context.getImageData(x, y, w, h);
       const id = this.nextId++;
       const message = { id, buffer: image.data.buffer, width: w, height: h, offsetX: x, offsetY: y, full, quad, modules, box };
-      return this.pool.submit({ id, generation, capturedAt: now, full, area: w * h, message }, [image.data.buffer]);
+      return [{ id, generation, capturedAt: now, full, area: w * h, message }, [image.data.buffer]];
     };
-    if (plan.full) submit(0, 0, width, height, true);
+    if (plan.full) this.pool.submit(...job(0, 0, width, height, true));
     for (const crop of plan.crops) {
-      if (!submit(crop.x, crop.y, crop.w, crop.h, false, crop.quad, crop.modules, crop.box)) break;
+      if (this.pool.queue(...job(crop.x, crop.y, crop.w, crop.h, false, crop.quad, crop.modules, crop.box))) this.onDropped(now);
     }
   }
 }

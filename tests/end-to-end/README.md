@@ -9,7 +9,8 @@ and single-code senders. Since then:
   every free worker used, camera-frame callbacks);
 - the decoder finishes with Gaussian elimination;
 - both senders show up to nine codes at a time, with staggered flips;
-- the default preset is *Fast*: 2953 bytes, 60 fps, one code;
+- the default preset is *Fast*: 2953 bytes and one code, at most 36 fps,
+  each code up a whole number of screen refreshes (about 28 ms);
 - both senders send wire v4 (RaptorQ, `docs/wire-v4.md`) by default, and
   every receiver reads v4 and upstream's v3;
 - a *Colour* preset stacks three codes in the red, green and blue channels.
@@ -116,7 +117,7 @@ the frame size and the distance is not information anyone can act on.
 | 6 | any | any | 1 MiB binary | deliberately fail at 2953 bytes / 60 fps, then fall back to the suggested lower setting | not run |
 | 7 | any | any | any | receiver installed to the home screen, device in airplane mode, app reopened | not run |
 | 8 | iPhone Safari web sender | another device's browser | multiple photos plus a file | defaults; save ZIP and compare extracted contents | not run |
-| 9 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary as case 2 | Fast (2953 B, 60 fps, 1 code) | not run |
+| 9 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary as case 2 | Fast (2953 B, 36 fps, 1 code) | not run |
 | 10 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Balanced and Max (2 and 4 codes) | not run |
 | 11 | web sender on a second screen | macOS desktop **Receive** mode, iPhone as Continuity Camera | 1 MiB binary | Fast, then Max | not run; see below |
 | 12 | macOS arm64 desktop | iPhone 14 Plus Safari | the same 1 MiB binary | Fast on v4, then Fast with *Wire format* set to v3, three runs each, alternating | not run |

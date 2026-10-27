@@ -68,13 +68,23 @@ cargo run -p desktop-sender --release --features receive  # macOS, adds Receive
 **Speed presets.** Both senders offer the same five, and *Fast* is the
 default:
 
-| Preset | Codes on screen | Frames/s | Bytes per code | On the wire (v4) |
+| Preset | Codes on screen | Bytes per code | Frames/s, at most | On the wire (v4), 144 Hz · 60 Hz screen |
 | --- | --- | --- | --- | --- |
-| Reliable | 1 | 24 | 1465 | 34 KiB/s |
-| Balanced | 2 | 30 | 2331 | 136 KiB/s |
-| Fast | 1 | 60 | 2953 | 172 KiB/s |
-| Colour | 1, ×3 layers | 60 | 1465 | 255 KiB/s |
-| Max | 4 | 60 | 2953 | 688 KiB/s |
+| Reliable | 1 | 1465 | 24 | 34 · 28 KiB/s |
+| Balanced | 2 | 2331 | 36 | 163 · 136 KiB/s |
+| Fast | 1 | 2953 | 36 | 103 · 86 KiB/s |
+| Colour | 1, ×3 layers | 1465 | 36 | 153 · 127 KiB/s |
+| Max | 4 | 2953 | 36 | 413 · 344 KiB/s |
+
+Frame rates are ceilings. A phone camera only reads a code that holds still,
+so each code stays up a whole number of screen refreshes, the fewest not
+much shorter than one frame at the chosen rate. 36 fps is about 28 ms a code:
+four refreshes of a 144 Hz screen, and two of a 60 Hz one, which therefore
+runs at 30. The presets used to run at 60. On a 144 Hz monitor that showed
+codes for three refreshes and two in turn, 21 and 14 ms, and an iPhone
+filming at 60 fps read the 14 ms ones about one time in eight, against two
+in three for the rest. What a preset reaches through a real camera depends
+more on how many codes the camera catches than on the rate on the wire.
 
 *Colour* puts three codes in one, in the red, green and blue channels. A
 camera keeps colour coarser than brightness, so colour codes need larger
@@ -86,11 +96,13 @@ Where the code fills most of the view, *Fine-tune* can raise colour's bytes
 per code.
 
 *Fine-tune* sets each value directly. That includes the error-correction
-level, 120 fps for a display that refreshes at least that fast, colour, and
-the wire format: v4, or v3 for a receiver running Decimen, which
-reads neither v4 nor colour. A code never changes twice within one refresh, so
-on a slower display the stream runs at the refresh rate and the sender's
-Display line says so.
+level, rates above 36 for a receiver capturing at 120 on a fast enough
+screen, colour, and the wire format: v4, or v3 for a receiver running
+Decimen, which reads neither v4 nor colour. Because every code stays up whole
+refreshes, a rate the screen cannot hold evenly runs slower: 60 fps is 48 on
+a 144 Hz screen, three refreshes a code, and 60 Hz caps every rate at 60. The
+sender's Display line says how long each code stays up, and flags anything
+under 25 ms, which a phone filming at 60 fps mostly misses.
 Frame rate and code count change a running stream in place. Bytes per code,
 ECC, wire format and colour change what each frame looks like, so changing
 any of them restarts the stream. A v4 receiver keeps what it already has
@@ -151,6 +163,18 @@ built-in camera, because browsers hide camera names until permission is
 granted. The settings popover picks the camera, capture width, capture rate
 and decode worker count, and the choice of camera is remembered.
 
+On an iPhone or iPad, *Rear (automatic)* opens the main lens on its own.
+Safari's own pick for the rear is Apple's multi-lens camera, which switches
+to the ultra-wide whenever the code is nearer than the main lens can focus;
+held near that distance it hops between lenses, and every hop blurs the code
+and moves it. The main lens never switches, but it cannot focus closer than
+its minimum distance, about 20 cm on recent iPhones: the telemetry's Lens
+line shows the lens in use and that distance, and the no-signal hint repeats
+it. The multi-lens camera is still in the camera menu. A page cannot choose
+where an iPhone camera focuses, so there is no tap to focus: WebKit, which
+every iOS browser uses, lets a page set zoom, torch and white balance but not
+focus.
+
 **What the receiver shows.** The transfer card has recovered percent, current
 rate, time remaining and elapsed time. Under them sit a one-minute chart of
 recovered data rate and a map with one pixel per source block (per source
@@ -173,8 +197,9 @@ and the pipeline:
 - scan mode and worker count
 - tracked-decode hits
 - per-path decode latency
-- dropped captures
+- crops dropped because every decoder stayed busy
 - the camera's actual resolution and frame rate
+- the lens in use and the nearest it focuses, where the browser says
 
 Elapsed time starts at the capture that produced the first accepted frame, so
 aiming is not counted. Use an incompressible file when comparing speeds.
@@ -184,8 +209,9 @@ stream is: on v4 the systematic sweep and then a count of repair symbols,
 which never repeat; on v3 the position in the carousel. Payload and
 compression, QR version, source count and size, the raw rate and the best
 case for one clean sweep. It also shows frames shown, the flip rate measured
-against its target, and the display's refresh rate. A window that stalls (hidden, occluded or throttled) says so, because a
-frozen stream otherwise looks like a receiver failure.
+against its target, and the display's refresh rate with how long each code
+stays up. A window that stalls (hidden, occluded or throttled) says so,
+because a frozen stream otherwise looks like a receiver failure.
 
 **If it is not picking anything up.** Fill about half the camera view with the
 code, hold still, turn the sending screen's brightness up, and step down a
@@ -198,18 +224,25 @@ instead.
 ## How it is fast
 
 - **Sender display.** Every code is drawn at a whole number of device pixels
-  per module and smooth-stretched for the remainder. With several codes on
-  screen, cell *j* flips at phase *j/N* of the frame interval, so an exposure
-  straddling a flip loses one code, not all of them. Every cell that has come
-  due flips on the same display frame, so codes × fps is not capped by the
-  refresh rate. The grid shape follows the screen's aspect. Encoding runs off
-  the drawing thread: a Web Worker in the browser, a thread on the desktop.
+  per module and smooth-stretched for the remainder. Every code stays up the
+  same whole number of display refreshes, counted from the spacing of
+  animation frames, so the camera gets the same time to photograph each one;
+  a frame the browser skips lengthens a code and never shortens the next.
+  With several codes on screen, cell *j* flips *j/N* of the way through that
+  hold, so an exposure straddling a flip loses only the codes changing on
+  that refresh, not all of them.
+  Every cell that has come due flips on the same display frame, so codes ×
+  fps is not capped by the refresh rate. The grid shape follows the screen's
+  aspect. Encoding runs off the drawing thread: a Web Worker in the browser,
+  a thread on the desktop.
 - **Receiver capture.** One capture per camera frame (`requestVideoFrameCallback`).
   Each locked code gets its own padded crop on its own worker, using zxing's
   tracked fast path. Full-frame scans run every 100 ms while acquiring, 250 ms
   with a code missing and 1500 ms when locked, and a due scan takes one worker
-  instead of the whole frame. A busy pool drops the frame instead of queueing
-  a stale one. The main thread does no per-frame DOM work.
+  instead of the whole frame. When every worker is busy, crops wait in a short
+  line instead of being skipped: a code is on screen for only a capture or two,
+  so a skipped crop is usually a code lost. A scan waits for an idle worker.
+  The main thread does no per-frame DOM work.
 - **Coding.** Wire v4 codes with RaptorQ. A source block decodes from about
   as many symbols as it has, whichever ones arrived, so a receiver needs one
   frame per source symbol however many it missed. Repair symbols never repeat,

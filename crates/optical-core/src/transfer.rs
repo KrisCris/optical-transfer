@@ -31,15 +31,17 @@ use crate::qr::{Ecc, FrameRenderer};
 /// modules it does not use.
 pub const FRAME_BYTES_OPTIONS: [usize; 6] = [500, 1000, 1465, 1850, 2331, 2953];
 
-/// Frames per second the sender offers.
+/// Frames per second the sender offers, as ceilings.
 ///
-/// 55 sits just under the 60 Hz ceiling on purpose: on a 120 Hz display it gets
-/// a clean two refresh cycles per frame, and on a 60 Hz screen the deliberate
-/// 5 fps slip against the refresh clock means frame boundaries drift through
-/// the scanout instead of riding it. 120 is for high-refresh displays and a
-/// receiver capturing at 120; on a slower display it runs at the refresh rate.
-/// The rate is the sender's pacing only and never reaches the wire.
-pub const TX_FPS_OPTIONS: [u32; 8] = [10, 15, 20, 24, 30, 55, 60, 120];
+/// Both senders hold each code a whole number of display refreshes, the fewest
+/// not much shorter than 1/fps, because a phone camera only reads a code that
+/// holds still: 60 fps on a 144 Hz display alternated three refreshes and two,
+/// and an iPhone missed most of the two-refresh codes. 36 is about 28 ms a
+/// code, enough for a phone filming at 60 fps: four refreshes at 144 Hz, and
+/// two at 60 Hz, where it runs at 30. 48 and 72 are three and two refreshes at
+/// 144 Hz and 120 one at 120 Hz, for a receiver capturing at 120. The rate is
+/// the sender's pacing only and never reaches the wire.
+pub const TX_FPS_OPTIONS: [u32; 10] = [10, 15, 20, 24, 30, 36, 48, 60, 72, 120];
 
 /// The pair upstream's own no-signal hint walks a struggling sender down to.
 ///

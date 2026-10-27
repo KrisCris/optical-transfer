@@ -5,9 +5,18 @@
 //    CSS stretches the remainder smoothly. Nearest-neighbour stretching makes
 //    adjacent modules differ by a whole pixel, which at grid densities is the
 //    difference between every code decoding and none (measured upstream).
-//  * With several codes on screen, cell j flips at phase j/N of the frame
-//    interval rather than all together, so a camera exposure straddling a
-//    flip loses at most one code instead of all of them.
+//  * Every code stays up a whole number of display frames, the fewest that
+//    are not much shorter than 1000/fps, so fps is a ceiling. A phone filming
+//    at 60 fps reads a code only while it holds still for most of two of its
+//    frames. 60 fps on a 144 Hz screen held codes three and two refreshes in
+//    turn (21 and 14 ms), and an iPhone read the 14 ms ones about one time in
+//    eight against two in three for the rest; at 36 fps every code is up four
+//    refreshes there, and two on a 60 Hz screen. Time is counted in display
+//    frames, measured from animation-frame spacing, so a frame the browser
+//    skips lengthens a code and never shortens the next.
+//  * With several codes on screen, cell j flips j/N of the way through the
+//    hold rather than all together, so a camera exposure straddling a flip
+//    loses only the codes that change on that frame instead of all of them.
 //  * A module byte's bits 0–2 say which of red, green and blue are dark there:
 //    7 is black and 0 white, so a plain code is painted exactly as before and
 //    a colour code (three codes, one per channel) needs nothing else.
@@ -16,6 +25,48 @@
 //    No cell flips twice in one frame, though: the first code would be painted
 //    over before any camera saw it. Asking for more fps than the display
 //    refreshes therefore runs at the refresh rate, and the flip count says so.
+
+/** How much shorter than 1000/fps a code may stay up, so that a refresh
+ *  measured a hair long does not add a whole frame to every code. */
+const HOLD_SLACK = 0.95;
+/** Animation-frame spacing assumed until a few frames have been measured. */
+const ASSUMED_PERIOD_MS = 1000 / 60;
+/** Codes up for less than this lose most of themselves to a 60 fps camera. */
+export const SHORT_HOLD_MS = 25;
+
+/** Display frames a code stays up at `fps` on a display that shows a frame
+ *  every `period` ms: the fewest whole frames not much shorter than 1000/fps.
+ *  60 fps on a 144 Hz screen is three refreshes each, 48 codes a second;
+ *  alternating three and two would make 60, at 14 ms for most of them. */
+export function holdFrames(fps, period) {
+  return Math.max(1, Math.ceil((HOLD_SLACK * 1000) / (fps * period)));
+}
+
+/** Milliseconds between this display's frames, the median of `frames`
+ *  animation-frame gaps; null if none arrive, as in a hidden tab. */
+export function measureRefresh(frames = 20) {
+  return new Promise((resolve) => {
+    const gaps = [];
+    let last = null;
+    let handle = 0;
+    const timeout = setTimeout(() => {
+      cancelAnimationFrame(handle);
+      resolve(null);
+    }, 2000);
+    const step = (now) => {
+      if (last !== null) gaps.push(now - last);
+      last = now;
+      if (gaps.length < frames) {
+        handle = requestAnimationFrame(step);
+        return;
+      }
+      clearTimeout(timeout);
+      gaps.sort((a, b) => a - b);
+      resolve(gaps[gaps.length >> 1] || null);
+    };
+    handle = requestAnimationFrame(step);
+  });
+}
 
 /** The `cols × rows` tiling of `codes` square cells of `cell` modules that
  *  gives each module the most CSS pixels in a `width × height` box. `fit` is
@@ -44,11 +95,11 @@ export class CodeDisplay {
     const resized = !this.info || this.info.qrSize !== streamInfo.qrSize;
     this.info = streamInfo;
     this.codes = stream.codes;
-    this.interval = 1000 / stream.fps;
-    this.subInterval = this.interval / this.codes;
+    this.fps = stream.fps;
     this.lookahead = Math.max(6, this.codes * 3);
     if (resized || !this.cells || this.cells.length !== this.codes) {
       this.cells = new Array(this.codes).fill(null);
+      this.upSince = new Array(this.codes).fill(-Infinity);
       this.cursor = 0;
     }
     this.layout();
@@ -56,20 +107,30 @@ export class CodeDisplay {
 
   start(requestFrames) {
     this.requestFrames = requestFrames;
-    this.queue = [];
-    this.requested = 0;
-    this.shown = 0;
-    this.flipTimes = [];
-    this.tickGaps = [];
-    this.stall = 0;
-    this.nextAt = performance.now();
-    this.lastTick = performance.now();
+    this.reset(performance.now());
     this.refill();
     const tick = (now) => {
       this.handle = requestAnimationFrame(tick);
       this.tick(now);
     };
     this.handle = requestAnimationFrame(tick);
+  }
+
+  /** An empty queue, zeroed counters and the clock at `now`. */
+  reset(now) {
+    this.queue = [];
+    this.requested = 0;
+    this.shown = 0;
+    this.flipTimes = [];
+    this.tickGaps = [];
+    this.stall = 0;
+    this.lastTick = now;
+    // Display frames so far, the frame the next cell is due on (fractional,
+    // so cells spread evenly through a hold), and the frame each cell's code
+    // went up on.
+    this.refreshes = 0;
+    this.dueAt = 1;
+    this.upSince = new Array(this.codes).fill(-Infinity);
   }
 
   stop() {
@@ -103,20 +164,25 @@ export class CodeDisplay {
     // Browsers throttle animation frames in hidden or occluded windows. The
     // stream then freezes mid-flip, which looks like a receiver failure.
     if (gap > 1000) this.stall = Math.max(this.stall, gap);
-    if (now < this.nextAt) return;
-    if (now - this.nextAt > this.interval) this.nextAt = now;
-    for (let placed = 0; placed < this.codes && now >= this.nextAt; placed++) {
+    // A gap of several frames is frames the browser skipped: they count.
+    const period = this.period();
+    this.refreshes += period ? Math.max(1, Math.round(gap / period)) : 1;
+    const hold = holdFrames(this.fps, period ?? ASSUMED_PERIOD_MS);
+    for (let placed = 0; placed < this.codes && this.refreshes >= this.dueAt - 0.5; placed++) {
+      // A code stays up its whole hold, even when the schedule runs late.
+      if (this.refreshes - this.upSince[this.cursor] < hold) break;
       const frame = this.queue.shift();
-      if (!frame) {
-        this.nextAt = now + this.subInterval;
-        break;
-      }
+      if (!frame) break;
       this.cells[this.cursor] = frame;
       this.paint(this.cursor);
+      this.upSince[this.cursor] = this.refreshes;
       this.cursor = (this.cursor + 1) % this.codes;
       this.shown++;
       this.flipTimes.push(now);
-      this.nextAt += this.subInterval;
+      // A late flip (a stall, an empty queue) moves the schedule with it, so
+      // the stream resumes at rate instead of bursting out a backlog.
+      if (this.refreshes - this.dueAt >= 0.5) this.dueAt = this.refreshes;
+      this.dueAt += hold / this.codes;
     }
     while (this.flipTimes.length && this.flipTimes[0] < now - 1000) this.flipTimes.shift();
     this.refill();
@@ -172,10 +238,25 @@ export class CodeDisplay {
     context.drawImage(this.staging, x, y, cell, cell, x * this.scale, y * this.scale, cell * this.scale, cell * this.scale);
   }
 
+  /** Milliseconds between display frames: the median animation-frame gap,
+   *  which an occasional skipped frame does not move. Null for the first few
+   *  frames, which count one each. */
+  period() {
+    if (this.tickGaps.length < 3) return null;
+    const sorted = [...this.tickGaps].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)] || null;
+  }
+
   /** Display refresh estimated from animation-frame spacing. */
   refreshHz() {
     if (this.tickGaps.length < 10) return null;
-    const sorted = [...this.tickGaps].sort((a, b) => a - b);
-    return 1000 / sorted[Math.floor(sorted.length / 2)];
+    return 1000 / this.period();
+  }
+
+  /** How long each code stays up on this display: frames and milliseconds. */
+  hold() {
+    const period = this.period() ?? ASSUMED_PERIOD_MS;
+    const frames = holdFrames(this.fps, period);
+    return { frames, ms: frames * period };
   }
 }

@@ -88,11 +88,9 @@ export class Telemetry {
     this.totals.crops += plan.crops.length;
   }
 
-  dropped(now) {
-    this.sessionStart ??= now;
-    this.totals.captures++;
+  /** A crop that waited for a busy pool until newer ones pushed it out. */
+  dropped() {
     this.totals.dropped++;
-    this.captures.push(now);
   }
 
   reply(now, job, reply) {

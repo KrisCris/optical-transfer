@@ -1,21 +1,24 @@
 // Send mode: selection, presets and stream stats. The worker's Rust engine
 // produces every module; code-display.js decides where and when they show.
 
-import { CodeDisplay } from "./code-display.js";
+import { CodeDisplay, SHORT_HOLD_MS, holdFrames, measureRefresh } from "./code-display.js";
 import { formatBytes, formatDuration, formatRate } from "./format.js";
 
 // Presets choose speed, not compatibility: the wire format stays as set.
+// Frame rates are ceilings (see code-display.js): 36 holds every code about
+// 28 ms, long enough for a phone filming at 60 fps, which is four refreshes
+// of a 144 Hz screen and two of a 60 Hz one, where it runs at 30.
 const PRESETS = {
   reliable: { bytes: 1465, fps: 24, codes: 1, color: false },
-  balanced: { bytes: 2331, fps: 30, codes: 2, color: false },
-  fast: { bytes: 2953, fps: 60, codes: 1, color: false },
+  balanced: { bytes: 2331, fps: 36, codes: 2, color: false },
+  fast: { bytes: 2953, fps: 36, codes: 1, color: false },
   // A camera keeps colour coarser than brightness, so a colour code needs
   // larger modules than a black and white one: version 27, not 40.
-  color: { bytes: 1465, fps: 60, codes: 1, color: true },
-  max: { bytes: 2953, fps: 60, codes: 4, color: false },
+  color: { bytes: 1465, fps: 36, codes: 1, color: true },
+  max: { bytes: 2953, fps: 36, codes: 4, color: false },
 };
 const BYTES_OPTIONS = [500, 1000, 1465, 1850, 2331, 2953];
-const FPS_OPTIONS = [10, 15, 20, 24, 30, 55, 60, 120];
+const FPS_OPTIONS = [10, 15, 20, 24, 30, 36, 48, 60, 72, 120];
 const CODES_OPTIONS = [1, 2, 4, 6, 9];
 // Per wire version: v4 is this app's RaptorQ format, v3 upstream Decimen's.
 const HEADER_BYTES = { 3: 22, 4: 16 };
@@ -49,6 +52,9 @@ let worker = null;
 let info = null;
 let settings = null;
 let lastStats = 0;
+// This screen's frame period, measured when the page first animates. Until
+// then, and in a hidden tab, rates are quoted at the nominal frame rate.
+let screenPeriod = null;
 
 // ------------------------------------------------------------- selection
 
@@ -166,15 +172,27 @@ function applyPreset(name) {
   settingsChanged();
 }
 
+/** Codes a second in each cell at `fps` on this screen, every code up a whole
+ *  number of its frames: 30 for 36 fps on a 60 Hz screen. */
+function perCell(fps) {
+  const period = (worker && info ? display.period() : null) ?? screenPeriod;
+  return period ? 1000 / (holdFrames(fps, period) * period) : fps;
+}
+
+function showPresetRate() {
+  const next = readSettings();
+  const layers = next.color ? 3 : 1;
+  const raw = (perCell(next.fps) * next.codes * layers * (next.frameBytes - HEADER_BYTES[next.wire])) / 1024;
+  els.presetRate.textContent = `${formatRate(raw)} on the wire`;
+}
+
 function settingsChanged() {
   const next = readSettings();
   const match = Object.entries(PRESETS).find(([, preset]) =>
     preset.bytes === next.frameBytes && preset.fps === next.fps && preset.codes === next.codes
       && preset.color === next.color && next.ecc === "L");
   for (const input of presetInputs) input.checked = match?.[0] === input.value;
-  const layers = next.color ? 3 : 1;
-  const raw = (next.fps * next.codes * layers * (next.frameBytes - HEADER_BYTES[next.wire])) / 1024;
-  els.presetRate.textContent = `${formatRate(raw)} on the wire`;
+  showPresetRate();
   if (!worker || !settings) return;
   // Bytes per code, ECC, wire format and colour are baked into every frame:
   // re-encode. Frame rate and code count only change the display, so the
@@ -200,6 +218,10 @@ applyPreset("fast");
 
 const display = new CodeDisplay(els.canvas, els.stage);
 window.addEventListener("resize", () => display.layout());
+void measureRefresh().then((period) => {
+  screenPeriod = period;
+  showPresetRate();
+});
 
 // -------------------------------------------------------------- streaming
 
@@ -291,12 +313,17 @@ function showStreamInfo() {
   els.compression.textContent = info.compressed ? `gzip → ${formatBytes(info.transmittedBytes)}` : "none (incompressible)";
   els.code.textContent = `V${info.qrVersion} ×${settings.codes}${info.layers > 1 ? " · colour" : ""} · ECC ${settings.ecc}`;
   els.k.textContent = `${info.sourceBlocks.toLocaleString()} × ${blockLen} B`;
-  const perSecond = settings.fps * settings.codes;
+  els.ideal.title = "One clean sweep with no missed frames";
+  showRate();
+}
+
+/** The raw rate and the best case, at the rate this screen allows. */
+function showRate() {
+  const perSecond = perCell(settings.fps) * settings.codes;
   const framesPerSecond = perSecond * info.layers;
-  els.rate.textContent = `${formatRate((framesPerSecond * blockLen) / 1024)} · ${perSecond} codes/s`;
+  els.rate.textContent = `${formatRate((framesPerSecond * info.blockLen) / 1024)} · ${Math.round(perSecond)} codes/s`;
   const ideal = info.sourceBlocks / framesPerSecond;
   els.ideal.textContent = ideal < 0.1 ? "one frame" : formatDuration(ideal);
-  els.ideal.title = "One clean sweep with no missed frames";
 }
 
 function statsLoop() {
@@ -322,15 +349,20 @@ function statsLoop() {
       : `Repair symbols · ${(sent - k + 1).toLocaleString()} sent, none repeated`;
   }
   els.frames.textContent = display.shown.toLocaleString();
-  const target = settings.fps * settings.codes;
+  const hold = display.hold();
+  const target = Math.round((settings.codes * 1000) / hold.ms);
   const actual = display.flipTimes.length;
   els.flips.textContent = `${actual} / ${target} per s`;
   els.flips.classList.toggle("warn", actual < target * 0.9 && display.shown > target);
+  // How long each code holds still is what decides whether a camera reads it.
   const hz = display.refreshHz();
-  const note = !hz ? "" : hz < settings.fps * 0.95 ? ` · caps ${Math.round(hz)} fps`
-    : hz < settings.fps * 1.5 && settings.fps > 30 ? " · 1 refresh per frame" : "";
-  els.display.textContent = hz ? `${Math.round(hz)} Hz${note}` : "—";
-  els.display.classList.toggle("warn", Boolean(hz) && hz < settings.fps * 0.95);
+  els.display.textContent = hz
+    ? `${Math.round(hz)} Hz · ${Math.round(hold.ms)} ms a code (${hold.frames} refresh${hold.frames === 1 ? "" : "es"})`
+    : "—";
+  els.display.classList.toggle("warn", Boolean(hz) && hold.ms < SHORT_HOLD_MS);
+  els.display.title = hold.ms < SHORT_HOLD_MS
+    ? "Codes change faster than a phone filming at 60 fps can photograph most of them" : "";
+  showRate();
   if (display.stall) setStatus(`This window stalled for ${(display.stall / 1000).toFixed(1)} s. Keep it visible and in front.`);
 }
 

@@ -11,7 +11,7 @@ import { CaptureLoop, DecodePool, RegionTracker } from "./capture.js";
 import { Telemetry, HISTORY_BUCKETS } from "./telemetry.js";
 import { BlockMap, drawBrackets, drawThroughput } from "./charts.js";
 import { formatBytes, formatDuration, formatRate } from "./format.js";
-import { pickDesktopCamera } from "./cameras.js";
+import { openMainLens, pickDesktopCamera } from "./cameras.js";
 
 // WasmReceiver.addFrame outcome codes; see crates/optical-wasm/src/lib.rs.
 const PROGRESS = 1;
@@ -31,7 +31,7 @@ const els = {
   hudState: $("rx-hud-state"), hudRate: $("rx-hud-rate"), hudBar: $("rx-hud-bar"),
   start: $("rx-start"), stop: $("rx-stop"), settings: $("rx-settings"),
   camera: $("rx-camera"), width: $("rx-width"), fps: $("rx-fps"), workers: $("rx-workers"),
-  status: $("rx-status"), error: $("rx-error"), hint: $("rx-hint"),
+  status: $("rx-status"), error: $("rx-error"), hint: $("rx-hint"), hintNear: $("rx-hint-near"),
   phase: $("rx-phase"), percent: $("rx-percent"), speed: $("rx-speed"), eta: $("rx-eta"),
   elapsed: $("rx-elapsed"), progress: $("rx-progress"), bar: $("rx-bar"),
   chart: $("rx-chart"), chartScale: $("rx-chart-scale"), map: $("rx-map"), mapLabel: $("rx-map-label"),
@@ -51,7 +51,7 @@ const pool = new DecodePool(
 const loop = new CaptureLoop({
   video: els.video, pool, tracker,
   onCapture: (now, plan) => telemetry.capture(now, plan),
-  onDropped: (now) => telemetry.dropped(now),
+  onDropped: () => telemetry.dropped(),
 });
 
 let receiver = null;
@@ -93,13 +93,25 @@ document.addEventListener("click", (event) => {
 
 const MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
   (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+// Every browser on an iPhone or iPad is Safari's engine underneath.
+const APPLE_MOBILE = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 const CAMERA_KEY = "optical-transfer.camera";
+const MAIN_LENS_KEY = "optical-transfer.main-lens";
 
-function rememberedCamera() {
+function stored(key) {
   try {
-    return localStorage.getItem(CAMERA_KEY) ?? "";
+    return localStorage.getItem(key) ?? "";
   } catch {
     return "";
+  }
+}
+
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Only a convenience: the camera still opens, it is just not remembered.
   }
 }
 
@@ -119,7 +131,7 @@ els.camera.options[0].text = AUTOMATIC;
 async function populateCameras() {
   const cameras = (await listCameras()).filter((device) => device.deviceId);
   if (!cameras.length) return;
-  const chosen = els.camera.value || rememberedCamera();
+  const chosen = els.camera.value || stored(CAMERA_KEY);
   els.camera.replaceChildren(
     new Option(AUTOMATIC, ""),
     ...cameras.map((device, index) => new Option(device.label || `Camera ${index + 1}`, device.deviceId)),
@@ -127,11 +139,7 @@ async function populateCameras() {
   els.camera.value = cameras.some((device) => device.deviceId === chosen) ? chosen : "";
 }
 els.camera.addEventListener("change", () => {
-  try {
-    localStorage.setItem(CAMERA_KEY, els.camera.value);
-  } catch {
-    // Only a convenience: the picker still works for this visit.
-  }
+  store(CAMERA_KEY, els.camera.value);
   if (running) void restartCamera();
 });
 
@@ -142,7 +150,7 @@ els.camera.addEventListener("change", () => {
 async function preferredCamera() {
   if (els.camera.value) return els.camera.value;
   if (MOBILE) return "";
-  const remembered = rememberedCamera();
+  const remembered = stored(CAMERA_KEY);
   const cameras = await listCameras();
   if (remembered && cameras.some((device) => device.deviceId === remembered)) return remembered;
   return pickDesktopCamera(cameras);
@@ -166,14 +174,23 @@ navigator.mediaDevices?.addEventListener?.("devicechange", async () => {
 
 // ------------------------------------------------------------------ camera
 
+/** The user's pick, else on an iPhone or iPad the main lens on its own (see
+ *  `openMainLens`), else whatever the browser finds for the rear. */
+async function acquireCamera() {
+  const device = await preferredCamera();
+  if (device || !APPLE_MOBILE) return openCamera(device);
+  const { camera, main } = await openMainLens(openCamera, listCameras, stored(MAIN_LENS_KEY));
+  store(MAIN_LENS_KEY, main);
+  return camera;
+}
+
 /** iOS treats `frameRate: {ideal: 60}` as a suggestion and delivers 30, so
  *  demand the rate exactly first and relax only when the camera refuses.
  *  Phones reach 120 fps only in their 16:9 formats, so the 4:3 size is a
  *  preference the exact rate is allowed to override. */
-async function acquireCamera() {
+async function openCamera(device) {
   const width = Number(els.width.value);
   const fps = Number(els.fps.value);
-  const device = await preferredCamera();
   const base = {
     ...(device ? { deviceId: { exact: device } } : { facingMode: { ideal: "environment" } }),
     width: { ideal: width },
@@ -537,16 +554,24 @@ function render(now, force = false) {
   t("latency").textContent = latency.tracked || latency.crop || latency.full
     ? `${ms(latency.tracked)} · ${ms(latency.crop)} · ${ms(latency.full)}` : "—";
   t("latency").title = "Tracked crop · crop · full frame, milliseconds per decode";
-  t("dropped").textContent = totals.captures
-    ? `${totals.dropped} (${((totals.dropped / totals.captures) * 100).toFixed(0)}%)` : "—";
+  t("dropped").textContent = totals.crops
+    ? `${totals.dropped} (${((totals.dropped / totals.crops) * 100).toFixed(0)}%)` : "—";
+  t("dropped").title = "Crops dropped because every decoder stayed busy, out of all crops taken";
   const track = stream?.getVideoTracks()[0];
   const settings = track?.getSettings?.();
   if (settings) {
+    const capabilities = track.getCapabilities?.() ?? {};
     // The ceiling says whether a higher capture rate is worth asking for.
-    const ceiling = Math.round(track.getCapabilities?.().frameRate?.max ?? 0);
+    const ceiling = Math.round(capabilities.frameRate?.max ?? 0);
     const rate = Math.round(settings.frameRate ?? 0);
     t("camera").textContent = `${settings.width}×${settings.height} @ ${rate}${ceiling > rate ? ` (max ${ceiling})` : ""}`;
     t("camera").title = track.label;
+    // The nearest a lens focuses, in metres where the browser says, is the
+    // nearest the code can be held.
+    const near = Math.round((capabilities.focusDistance?.min ?? 0) * 100);
+    t("lens").textContent = `${track.label || "—"}${near > 0 ? ` · focuses from ${near} cm` : ""}`;
+    els.hintNear.textContent = `Keep the camera at least ${near} cm from the screen: this lens cannot focus any closer.`;
+    els.hintNear.hidden = near < 5;
   }
   if (pool.version) $("t-decoder").textContent = `zxing ${pool.version}`;
 

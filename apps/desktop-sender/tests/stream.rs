@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use desktop_sender::stream::{FlipClock, FrameSource, best_grid};
+use desktop_sender::stream::{FlipClock, FrameSource, best_grid, hold_frames};
 use eframe::egui::Color32;
 use optical_core::transfer::{Transfer, TransferSettings};
 
@@ -17,13 +17,29 @@ fn run(clock: &mut FlipClock, start: Instant, hz: f64, seconds: f64) -> Vec<(Ins
     flips
 }
 
+/// For every cell, how many `hz` refreshes each of its codes stayed up,
+/// leaving out flips in the first 200 ms while the refresh is still measured.
+fn holds(flips: &[(Instant, usize)], start: Instant, hz: f64) -> Vec<u32> {
+    let mut last = std::collections::HashMap::new();
+    let mut frames = Vec::new();
+    for (at, cell) in flips {
+        if let Some(previous) = last.insert(*cell, *at)
+            && at.duration_since(start) >= Duration::from_millis(200)
+        {
+            frames.push((at.duration_since(previous).as_secs_f64() * hz).round() as u32);
+        }
+    }
+    frames
+}
+
 #[test]
 fn codes_times_fps_is_not_capped_by_the_refresh_rate() {
     let start = Instant::now();
     let mut clock = FlipClock::new(60, 4, start);
     let flips = run(&mut clock, start, 60.0, 2.0);
     // 240 codes a second on a 60 Hz display; one flip per vsync would be 120.
-    assert!((470..=484).contains(&flips.len()), "{} flips", flips.len());
+    // The first frame flips three cells, every later one all four.
+    assert!((478..=480).contains(&flips.len()), "{} flips", flips.len());
     let cells: Vec<_> = flips.iter().take(8).map(|(_, cell)| *cell).collect();
     assert_eq!(cells, [0, 1, 2, 3, 0, 1, 2, 3], "cells flip in turn");
     assert!((55.0..65.0).contains(&clock.refresh_hz().unwrap()));
@@ -45,13 +61,113 @@ fn a_rate_above_the_refresh_rate_runs_at_the_refresh_rate() {
     );
     assert!((118..=121).contains(&flips.len()), "{} flips", flips.len());
 
+    // One 144 Hz refresh is short of 1/120 s, so each code stays up two: 72 a
+    // second, evenly, rather than 120 alternating one refresh and two.
     let mut clock = FlipClock::new(120, 1, start);
     let flips = run(&mut clock, start, 144.0, 2.0);
     assert!(
-        (236..=242).contains(&flips.len()),
-        "a 144 Hz display reaches 120: {} flips",
+        (143..=145).contains(&flips.len()),
+        "a 144 Hz display holds 120 fps codes two refreshes: {} flips",
         flips.len()
     );
+    assert!(
+        holds(&flips, start, 144.0)
+            .iter()
+            .all(|frames| *frames == 2)
+    );
+}
+
+#[test]
+fn a_code_stays_up_the_fewest_whole_refreshes_not_much_shorter_than_its_interval() {
+    let frames = |fps, hz: f64| hold_frames(fps, Duration::from_secs_f64(1.0 / hz));
+    assert_eq!(frames(36, 144.0), 4, "28 ms");
+    assert_eq!(frames(36, 60.0), 2, "33 ms: 30 a second");
+    assert_eq!(frames(36, 30.0), 1, "a device drawing 30 frames a second");
+    assert_eq!(frames(36, 120.0), 4);
+    assert_eq!(frames(36, 165.0), 5);
+    assert_eq!(frames(36, 75.0), 2);
+    assert_eq!(frames(60, 144.0), 3, "never three and two in turn");
+    assert_eq!(frames(60, 60.0), 1);
+    assert_eq!(frames(24, 60.0), 3);
+    assert_eq!(frames(30, 144.0), 5);
+    assert_eq!(frames(72, 144.0), 2);
+    assert_eq!(frames(120, 60.0), 1, "never less than one refresh");
+}
+
+#[test]
+fn at_144_hz_every_36_fps_code_stays_up_four_refreshes_and_60_fps_three() {
+    for (fps, expected, per_second) in [(36, 4, 36), (60, 3, 48)] {
+        let start = Instant::now();
+        let mut clock = FlipClock::new(fps, 1, start);
+        let flips = run(&mut clock, start, 144.0, 2.0);
+        let up = holds(&flips, start, 144.0);
+        assert!(
+            !up.is_empty() && up.iter().all(|frames| *frames == expected),
+            "{fps} fps: {up:?}"
+        );
+        assert!(
+            flips.len().abs_diff(2 * per_second) <= 2,
+            "{fps} fps: {} in 2 s",
+            flips.len()
+        );
+    }
+}
+
+#[test]
+fn thirty_six_fps_runs_at_30_on_a_60_hz_display_and_on_one_drawing_30_frames() {
+    for (hz, expected) in [(60.0, 2), (30.0, 1)] {
+        let start = Instant::now();
+        let mut clock = FlipClock::new(36, 1, start);
+        let flips = run(&mut clock, start, hz, 2.0);
+        assert!(
+            holds(&flips, start, hz)
+                .iter()
+                .all(|frames| *frames == expected),
+            "{hz} Hz"
+        );
+        assert!(
+            flips.len().abs_diff(60) <= 2,
+            "{hz} Hz: {} in 2 s",
+            flips.len()
+        );
+    }
+}
+
+#[test]
+fn four_codes_at_144_hz_flip_one_a_refresh_each_up_four() {
+    let start = Instant::now();
+    let mut clock = FlipClock::new(36, 4, start);
+    let flips = run(&mut clock, start, 144.0, 2.0);
+    let mut per_frame = std::collections::HashMap::new();
+    for (at, _) in &flips {
+        if at.duration_since(start) >= Duration::from_millis(200) {
+            *per_frame.entry(*at).or_insert(0) += 1;
+        }
+    }
+    assert!(
+        per_frame.values().all(|count| *count == 1),
+        "two cells flipped together"
+    );
+    assert!(
+        holds(&flips, start, 144.0)
+            .iter()
+            .all(|frames| *frames == 4)
+    );
+    assert!(flips.len().abs_diff(288) <= 4, "{} flips", flips.len());
+}
+
+#[test]
+fn a_frame_the_window_skips_lengthens_a_code_and_never_shortens_the_next() {
+    let start = Instant::now();
+    let mut clock = FlipClock::new(36, 1, start);
+    let mut flips = Vec::new();
+    // Every seventh display frame never reaches the clock.
+    for index in (0..288_u32).filter(|index| index % 7 != 6) {
+        let now = start + Duration::from_secs_f64(f64::from(index) / 144.0);
+        clock.tick(now, || Some(()), |cell, ()| flips.push((now, cell)));
+    }
+    let up = holds(&flips, start, 144.0);
+    assert!(up.iter().all(|frames| *frames >= 4), "{up:?}");
 }
 
 #[test]
